@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+:root {
+  --navy-950: #0B1330;
+  --navy-900: #101C42;
+  --navy-800: #152657;
+  --blue-600: #2453D6;
+  --blue-500: #3B6BFA;
+  --blue-400: #6E8CFF;
+  --cyan-400: #4DD8E8;
+  --amber-500: #E8A23B;
+  --green-500: #2FBE8F;
+  --paper: #F4F6FC;
+  --paper-card: #FFFFFF;
+  --ink-900: #0E1430;
+  --ink-600: #5A6182;
+  --ink-400: #9AA1C4;
+  --line: #E4E8F7;
+  --radius-lg: 22px;
+  --radius-md: 16px;
+  --radius-sm: 10px;
+}
+
+[data-theme="dark"] {
+  --paper: #0B1130;
+  --paper-card: #131B3E;
+  --ink-900: #EEF1FF;
+  --ink-600: #AEB4DA;
+  --ink-400: #7A81A8;
+  --line: #242D57;
+}
+
+body {
+  background-color: var(--paper);
+  color: var(--ink-900);
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+  margin: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.font-serif-brand {
+  font-family: 'Fraunces', serif;
+}
+
+.font-mono-code {
+  font-family: 'Space Mono', monospace;
+}
+
+/* Custom scrollbar hiding */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom pulse and glowing rings */
+@keyframes ring-pulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(77, 216, 232, 0.4); }
+  70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(77, 216, 232, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(77, 216, 232, 0); }
+}
+
+.ring-pulse-active {
+  animation: ring-pulse 2s infinite;
+}
+

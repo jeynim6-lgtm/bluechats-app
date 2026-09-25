@@ -1,0 +1,84 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId);
+    }
+
+    // Chats & Messages
+    match /chats/{chatId} {
+      allow read, write: if isSignedIn();
+
+      match /messages/{messageId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // Discover Feed Posts
+    match /discoverPosts/{postId} {
+      allow read: if true; // Public For You feed
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isSignedIn();
+      }
+
+      match /views/{viewId} {
+        allow read, write: if true;
+      }
+    }
+
+    // Friend Requests
+    match /friendRequests/{requestId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Wallet applicants pre-registration
+    match /walletApplicants/{applicantId} {
+      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || request.auth.token.role == 'ceo' || request.auth.token.role == 'admin');
+      allow create: if true;
+    }
+
+    // Bug Reports
+    match /bugReports/{reportId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    // Admin audit access log
+    match /adminAccessLog/{logId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Status stories
+    match /statusUpdates/{statusId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+    }
+
+    // Call history
+    match /calls/{callId} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}

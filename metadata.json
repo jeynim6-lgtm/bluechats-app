@@ -1,0 +1,11 @@
+{
+  "name": "Remix Blue Chats",
+  "description": "High-performance real-time messaging, voice \u0026 video calls, status stories, and digital wallet coming soon.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

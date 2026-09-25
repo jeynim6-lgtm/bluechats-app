@@ -1,0 +1,263 @@
+{
+  "entities": {
+    "user": {
+      "title": "User Profile",
+      "description": "User profile with display information and presence.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "User unique ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full name of the user",
+          "maxLength": 100
+        },
+        "phone": {
+          "type": "string",
+          "description": "Phone number",
+          "maxLength": 30
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address",
+          "maxLength": 120
+        },
+        "country": {
+          "type": "string",
+          "description": "Country of residence",
+          "maxLength": 60
+        },
+        "bio": {
+          "type": "string",
+          "description": "Status or bio line",
+          "maxLength": 200
+        },
+        "avatarUrl": {
+          "type": "string",
+          "description": "Avatar media URL stored on Bunny.net",
+          "maxLength": 500
+        },
+        "isOnline": {
+          "type": "boolean",
+          "description": "Live online presence flag"
+        }
+      },
+      "required": ["id", "name", "phone"]
+    },
+    "chat": {
+      "title": "Chat Room",
+      "description": "Conversation between two users or a group.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique chat room ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Chat display title or recipient name",
+          "maxLength": 100
+        },
+        "isGroup": {
+          "type": "boolean",
+          "description": "Whether this is a group conversation"
+        },
+        "participants": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "User IDs of participants"
+        },
+        "lastMessage": {
+          "type": "string",
+          "description": "Snippet of last message",
+          "maxLength": 200
+        },
+        "lastMessageTimestamp": {
+          "type": "number",
+          "description": "Unix timestamp in ms"
+        }
+      },
+      "required": ["id", "participants"]
+    },
+    "message": {
+      "title": "Chat Message",
+      "description": "Individual message text or Bunny.net media URL.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique message ID"
+        },
+        "chatId": {
+          "type": "string",
+          "description": "Parent chat ID"
+        },
+        "senderId": {
+          "type": "string",
+          "description": "Author UID"
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Author display name",
+          "maxLength": 100
+        },
+        "type": {
+          "type": "string",
+          "description": "Message category",
+          "enum": ["text", "voice", "image", "video", "file", "location", "contact", "system", "call"]
+        },
+        "text": {
+          "type": "string",
+          "description": "Text body or caption",
+          "maxLength": 5000
+        },
+        "mediaUrl": {
+          "type": "string",
+          "description": "Bunny.net CDN URL for photos, videos, and voice recordings",
+          "maxLength": 1000
+        },
+        "mediaDuration": {
+          "type": "number",
+          "description": "Duration in seconds for voice notes and videos"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Timestamp in milliseconds"
+        },
+        "status": {
+          "type": "string",
+          "description": "Delivery status",
+          "enum": ["sent", "delivered", "read"]
+        }
+      },
+      "required": ["id", "chatId", "senderId", "type", "timestamp"]
+    },
+    "discoverPost": {
+      "title": "Discover Post",
+      "description": "Public post on the Discover For You feed.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "country": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "caption": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "commentCount": { "type": "number" },
+        "viewCount": { "type": "number" },
+        "starCount": { "type": "number" }
+      },
+      "required": ["id", "uid", "mediaUrl", "caption", "createdAt"]
+    },
+    "discoverComment": {
+      "title": "Discover Comment",
+      "description": "Comment under a public Discover post.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "postId": { "type": "string" },
+        "uid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "postId", "uid", "text", "createdAt"]
+    },
+    "friendRequest": {
+      "title": "Friend Request",
+      "description": "Friend request initiated from Discover or Contact book.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fromUid": { "type": "string" },
+        "toUid": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "fromUid", "toUid", "status", "createdAt"]
+    },
+    "walletApplicant": {
+      "title": "Wallet Applicant",
+      "description": "Pre-registration record for Blue Chats Wallet under FICA / POPIA.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "docType": { "type": "string", "enum": ["id", "passport", "drivers_licence", "asylum_doc"] },
+        "docNumberMasked": { "type": "string" },
+        "termsAccepted": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["pre-registered"] },
+        "appliedAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "name", "docType", "docNumberMasked", "termsAccepted", "appliedAt"]
+    },
+    "bugReport": {
+      "title": "Bug Report",
+      "description": "User-submitted bug and error diagnostic reports.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "description": { "type": "string" },
+        "screen": { "type": "string" },
+        "appVersion": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "description", "screen", "createdAt"]
+    },
+    "adminAccessLog": {
+      "title": "Admin Access Log",
+      "description": "POPIA audit log for CEO & Admin dashboard access.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "adminEmail", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/user" },
+      "description": "Stores user profiles."
+    },
+    "/chats/{chatId}": {
+      "schema": { "$ref": "#/entities/chat" },
+      "description": "Stores chat room metadata."
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/message" },
+      "description": "Stores text and Bunny.net media metadata for chat messages."
+    },
+    "/discoverPosts/{postId}": {
+      "schema": { "$ref": "#/entities/discoverPost" },
+      "description": "Public For You discover feed posts."
+    },
+    "/discoverPosts/{postId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/discoverComment" },
+      "description": "Realtime comments on discover posts."
+    },
+    "/friendRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/friendRequest" },
+      "description": "Friend request states."
+    },
+    "/walletApplicants/{applicantId}": {
+      "schema": { "$ref": "#/entities/walletApplicant" },
+      "description": "Pre-registered wallet applicant details (kept locked until 50,000 users)."
+    },
+    "/bugReports/{reportId}": {
+      "schema": { "$ref": "#/entities/bugReport" },
+      "description": "User bug reports for engineering & CEO dashboard."
+    },
+    "/adminAccessLog/{logId}": {
+      "schema": { "$ref": "#/entities/adminAccessLog" },
+      "description": "POPIA privacy audit logs."
+    }
+  }
+}
