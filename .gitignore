@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# E2E test screenshots
+tests/e2e/artifacts/
+server.js

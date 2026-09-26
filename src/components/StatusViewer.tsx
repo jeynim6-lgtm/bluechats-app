@@ -1,262 +1,264 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { X, Star, ExternalLink } from 'lucide-react';
-import { StatusContact, StatusItem } from '../types';
-import { SPONSORED_ADS } from '../services/mockInitialData';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X, ExternalLink, Eye, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useMe } from '../context/AuthContext';
+import { markStatusViewed, deleteStatus, trackSponsored } from '../services/status';
+import { getUserProfile } from '../services/users';
+import { formatRelative } from '../lib/format';
+import { BRANDING } from '../config/branding';
+import { Avatar, Sheet, toast } from './ui';
+import type { StatusGroup, StatusItem } from '../types';
+
+const IMAGE_DURATION = 5000;
+const TEXT_DURATION = 5000;
 
 interface StatusViewerProps {
-  contacts: StatusContact[];
-  initialContactIndex: number;
+  groups: StatusGroup[];
+  initialIndex: number;
   onClose: () => void;
-  onStarStatus?: (contactId: string, itemId: string) => void;
 }
 
-export const StatusViewer: React.FC<StatusViewerProps> = ({
-  contacts,
-  initialContactIndex,
-  onClose,
-  onStarStatus,
-}) => {
-  const [contactIndex, setContactIndex] = useState(initialContactIndex);
-  const [segmentIndex, setSegmentIndex] = useState(0);
+export const StatusViewer: React.FC<StatusViewerProps> = ({ groups, initialIndex, onClose }) => {
+  const me = useMe();
+  const [groupIndex, setGroupIndex] = useState(initialIndex);
+  const [itemIndex, setItemIndex] = useState(0);
   const [progress, setProgress] = useState(0);
-  const [isPaused, setIsPaused] = useState(false);
-  const [stars, setStars] = useState<Record<string, boolean>>({});
+  const [paused, setPaused] = useState(false);
+  const [viewersOpen, setViewersOpen] = useState(false);
+  const [viewerNames, setViewerNames] = useState<Array<{ uid: string; name: string; color: string; url?: string | null }>>([]);
+  const [deleted, setDeleted] = useState<Set<string>>(new Set());
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const startedAt = useRef(Date.now());
+  const elapsedBeforePause = useRef(0);
 
-  const SEGMENT_DURATION = 4500; // 4.5 seconds per slide
-  const timerRef = useRef<number | null>(null);
-  const startRef = useRef<number>(Date.now());
+  const group = groups[groupIndex];
 
-  const currentContact = contacts[contactIndex];
-
-  // Interleave sponsored item if appropriate matching design
-  const items: StatusItem[] = React.useMemo(() => {
-    if (!currentContact) return [];
-    const list: StatusItem[] = [...currentContact.items];
-    if (list.length >= 2) {
-      const ad = SPONSORED_ADS[contactIndex % SPONSORED_ADS.length];
+  // Other people's stories get one sponsored card after the second update.
+  const items: StatusItem[] = useMemo(() => {
+    if (!group) return [];
+    const list = group.items.filter((s) => !deleted.has(s.id));
+    const cards = BRANDING.sponsoredCards;
+    if (!group.isMine && list.length >= 2 && cards.length) {
+      const card = cards[groupIndex % cards.length];
       list.splice(2, 0, {
-        id: `ad-${ad.sponsor}`,
+        id: `sponsored-${card.id}-${group.authorId}`,
+        authorId: 'sponsored',
+        author: { name: card.sponsor, avatarColor: BRANDING.colors.gold },
         type: 'text',
-        text: ad.text,
-        bg: ad.bg,
-        timestamp: Date.now(),
-        timeFormatted: 'Sponsored',
-        views: 0,
+        text: card.text,
+        bg: card.bg,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 1,
+        viewers: [],
         sponsored: true,
-        sponsor: ad.sponsor,
-        cta: ad.cta,
+        sponsorId: card.id,
+        sponsor: card.sponsor,
+        cta: card.cta,
+        ctaUrl: card.url,
       });
     }
     return list;
-  }, [currentContact, contactIndex]);
+  }, [group, groupIndex, deleted]);
 
-  const currentItem = items[segmentIndex];
+  const item = items[itemIndex];
 
-  // Advance to next segment
-  const nextSegment = () => {
-    if (segmentIndex < items.length - 1) {
-      setSegmentIndex((prev) => prev + 1);
-      setProgress(0);
-    } else if (contactIndex < contacts.length - 1) {
-      setContactIndex((prev) => prev + 1);
-      setSegmentIndex(0);
-      setProgress(0);
-    } else {
-      onClose();
+  const next = useCallback(() => {
+    setProgress(0);
+    elapsedBeforePause.current = 0;
+    if (itemIndex < items.length - 1) setItemIndex((i) => i + 1);
+    else if (groupIndex < groups.length - 1) {
+      setGroupIndex((g) => g + 1);
+      setItemIndex(0);
+    } else onClose();
+  }, [itemIndex, items.length, groupIndex, groups.length, onClose]);
+
+  const prev = useCallback(() => {
+    setProgress(0);
+    elapsedBeforePause.current = 0;
+    if (itemIndex > 0) setItemIndex((i) => i - 1);
+    else if (groupIndex > 0) {
+      setGroupIndex((g) => g - 1);
+      setItemIndex(0);
     }
-  };
+  }, [itemIndex, groupIndex]);
 
-  // Back to previous segment
-  const prevSegment = () => {
-    if (segmentIndex > 0) {
-      setSegmentIndex((prev) => prev - 1);
-      setProgress(0);
-    } else if (contactIndex > 0) {
-      setContactIndex((prev) => prev - 1);
-      setSegmentIndex(0);
-      setProgress(0);
-    }
-  };
-
-  // Progress timer loop
+  // Record views / impressions
   useEffect(() => {
-    if (isPaused || !currentItem) return;
+    if (!item) return;
+    if (item.sponsored && item.sponsorId) void trackSponsored(item.sponsorId, 'impressions');
+    else if (!group.isMine && !item.viewers.includes(me.uid)) void markStatusViewed(item.id, me.uid);
+  }, [item?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    startRef.current = Date.now();
-    const interval = window.setInterval(() => {
-      const elapsed = Date.now() - startRef.current;
-      const pct = Math.min(100, (elapsed / SEGMENT_DURATION) * 100);
+  // Timer for text/image items (videos drive progress from playback)
+  useEffect(() => {
+    if (!item || item.type === 'video' || paused || viewersOpen) return;
+    const duration = item.type === 'image' ? IMAGE_DURATION : TEXT_DURATION;
+    startedAt.current = Date.now() - elapsedBeforePause.current;
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt.current;
+      elapsedBeforePause.current = elapsed;
+      const pct = Math.min(100, (elapsed / duration) * 100);
       setProgress(pct);
-
       if (pct >= 100) {
-        clearInterval(interval);
-        nextSegment();
+        window.clearInterval(id);
+        next();
       }
-    }, 40);
+    }, 50);
+    return () => window.clearInterval(id);
+  }, [item?.id, paused, viewersOpen, next]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return () => clearInterval(interval);
-  }, [segmentIndex, contactIndex, isPaused, items.length]);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (paused || viewersOpen) v.pause();
+    else void v.play().catch(() => {});
+  }, [paused, viewersOpen, item?.id]);
 
-  const toggleStar = () => {
-    if (!currentItem) return;
-    setStars((prev) => ({
-      ...prev,
-      [currentItem.id]: !prev[currentItem.id],
-    }));
-    if (onStarStatus && currentContact) {
-      onStarStatus(currentContact.id, currentItem.id);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowRight') next();
+      else if (e.key === 'ArrowLeft') prev();
+      else if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [next, prev, onClose]);
+
+  const openViewers = async () => {
+    if (!item) return;
+    setViewersOpen(true);
+    const profiles = await Promise.all(item.viewers.map((uid) => getUserProfile(uid).catch(() => null)));
+    setViewerNames(
+      profiles.filter(Boolean).map((p) => ({ uid: p!.uid, name: p!.name, color: p!.avatarColor, url: p!.avatarUrl }))
+    );
+  };
+
+  const remove = async () => {
+    if (!item || !window.confirm('Delete this status update?')) return;
+    try {
+      await deleteStatus(item);
+      setDeleted((d) => new Set(d).add(item.id));
+      if (items.length <= 1) onClose();
+      else if (itemIndex >= items.length - 1) setItemIndex((i) => Math.max(0, i - 1));
+      toast('Status deleted');
+    } catch (err) {
+      toast((err as Error).message);
     }
   };
 
-  if (!currentContact || !currentItem) return null;
+  if (!group || !item) return null;
 
-  const isStarred = stars[currentItem.id] || currentItem.starred;
+  const hold = { onPointerDown: () => setPaused(true), onPointerUp: () => setPaused(false), onPointerLeave: () => setPaused(false) };
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-[#05070F] text-white flex flex-col max-w-[480px] mx-auto select-none"
-      onMouseDown={() => setIsPaused(true)}
-      onMouseUp={() => setIsPaused(false)}
-      onTouchStart={() => setIsPaused(true)}
-      onTouchEnd={() => setIsPaused(false)}
-    >
-      {/* Top Progress Bars */}
+    <div className="fixed inset-0 z-[60] bg-[#05070F] text-white flex flex-col max-w-[480px] mx-auto select-none" role="dialog" aria-label="Status viewer">
       <div className="flex gap-1 px-3 pt-3 pb-2 z-20">
-        {items.map((it, idx) => {
-          let fillWidth = '0%';
-          if (idx < segmentIndex) fillWidth = '100%';
-          else if (idx === segmentIndex) fillWidth = `${progress}%`;
-
-          return (
-            <div
-              key={it.id || idx}
-              className="flex-1 h-1 rounded-full bg-white/25 overflow-hidden"
-            >
-              <div
-                className="h-full bg-white transition-all duration-75 ease-linear"
-                style={{ width: fillWidth }}
-              ></div>
-            </div>
-          );
-        })}
+        {items.map((it, idx) => (
+          <div key={it.id} className="flex-1 h-1 rounded-full bg-white/25 overflow-hidden">
+            <div className="h-full bg-white" style={{ width: idx < itemIndex ? '100%' : idx === itemIndex ? `${progress}%` : '0%' }} />
+          </div>
+        ))}
       </div>
 
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 z-20">
-        <div className="flex items-center gap-2.5">
-          <div
-            className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-white text-xs border border-white/20 shadow-xs"
-            style={{
-              backgroundColor: currentItem.sponsored ? '#E8A23B' : currentContact.avatarColor,
-            }}
-          >
-            {currentItem.sponsored ? '$' : currentContact.name.substring(0, 2).toUpperCase()}
-          </div>
-          <div>
-            <h3 className="font-bold text-sm leading-tight">
-              {currentItem.sponsored ? currentItem.sponsor : currentContact.name}
-            </h3>
-            <span className="text-[11px] text-[#B9C0E6]">
-              {currentItem.sponsored ? 'Sponsored' : currentItem.timeFormatted}
-            </span>
+        <div className="flex items-center gap-2.5 min-w-0">
+          {item.sponsored ? (
+            <div className="w-9 h-9 rounded-full bg-gold flex items-center justify-center font-bold">★</div>
+          ) : (
+            <Avatar name={group.isMine ? me.name : group.name} color={group.avatarColor} url={group.avatarUrl} size={36} shape="circle" />
+          )}
+          <div className="min-w-0">
+            <h3 className="font-bold text-sm truncate">{item.sponsored ? item.sponsor : group.isMine ? 'My status' : group.name}</h3>
+            <span className="text-[11px] text-haze">{item.sponsored ? 'Sponsored' : formatRelative(item.createdAt)}</span>
           </div>
         </div>
-
-        <button
-          onClick={onClose}
-          className="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/20 active:scale-90 transition-all text-white cursor-pointer"
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-1">
+          {group.isMine && !item.sponsored && (
+            <button onClick={remove} aria-label="Delete status" className="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/20 cursor-pointer">
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
+          <button onClick={onClose} aria-label="Close" className="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/20 cursor-pointer">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
-      {/* Story Center Body with Tap Zones */}
-      <div
-        className="flex-1 relative flex items-center justify-center px-6 text-center overflow-hidden"
-        style={{ backgroundColor: currentItem.bg || '#152657' }}
-      >
-        {/* Left Tap Zone */}
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            prevSegment();
-          }}
-          className="absolute inset-y-0 left-0 w-1/3 z-10 cursor-pointer"
-        ></div>
+      <div className="flex-1 relative flex items-center justify-center text-center overflow-hidden" style={{ backgroundColor: item.type === 'text' ? item.bg : '#000' }} {...hold}>
+        <button onClick={prev} aria-label="Previous" className="absolute inset-y-0 left-0 w-1/3 z-10 cursor-pointer flex items-center justify-start pl-1 opacity-0 hover:opacity-60">
+          <ChevronLeft className="w-6 h-6" />
+        </button>
+        <button onClick={next} aria-label="Next" className="absolute inset-y-0 right-0 w-2/3 z-10 cursor-pointer flex items-center justify-end pr-1 opacity-0 hover:opacity-60">
+          <ChevronRight className="w-6 h-6" />
+        </button>
 
-        {/* Right Tap Zone */}
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            nextSegment();
-          }}
-          className="absolute inset-y-0 right-0 w-2/3 z-10 cursor-pointer"
-        ></div>
-
-        {/* Sponsor Pill */}
-        {currentItem.sponsored && (
-          <div className="absolute top-4 bg-[#E8A23B]/25 border border-[#E8A23B] text-[#E8A23B] text-[11px] font-bold px-3 py-1 rounded-full uppercase tracking-wider z-20">
-            Sponsored Partner
+        {item.sponsored && (
+          <div className="absolute top-4 bg-gold/25 border border-gold text-gold text-[11px] font-bold px-3 py-1 rounded-full uppercase tracking-wider z-20">
+            Sponsored
           </div>
         )}
 
-        {/* Content */}
-        {currentItem.type === 'text' && (
-          <p className="font-serif-brand font-semibold text-2xl md:text-3xl leading-snug text-white max-w-sm drop-shadow-md z-10">
-            {currentItem.text}
-          </p>
+        {item.type === 'text' && (
+          <p className="font-serif-brand font-semibold text-2xl leading-snug max-w-sm px-6 drop-shadow-md whitespace-pre-wrap break-words">{item.text}</p>
         )}
-
-        {currentItem.type === 'image' && currentItem.mediaUrl && (
-          <img
-            src={currentItem.mediaUrl}
-            alt="Status"
-            className="w-full h-full object-cover z-10"
-          />
-        )}
-
-        {currentItem.type === 'video' && currentItem.mediaUrl && (
+        {item.type === 'image' && item.mediaUrl && <img src={item.mediaUrl} alt="Status" className="w-full h-full object-contain" />}
+        {item.type === 'video' && item.mediaUrl && (
           <video
-            src={currentItem.mediaUrl}
+            key={item.id}
+            ref={videoRef}
+            src={item.mediaUrl}
             autoPlay
-            loop
-            muted
             playsInline
-            className="w-full h-full object-cover z-10"
+            className="w-full h-full object-contain"
+            onTimeUpdate={(e) => {
+              const v = e.currentTarget;
+              if (v.duration) setProgress(Math.min(100, (v.currentTime / Math.min(v.duration, 60)) * 100));
+              if (v.currentTime >= 60) next();
+            }}
+            onEnded={next}
           />
         )}
-      </div>
-
-      {/* Footer */}
-      <div className="px-5 py-4 bg-black/40 backdrop-blur-md flex items-center justify-between z-20">
-        {!currentItem.sponsored ? (
-          <>
-            <button
-              onClick={toggleStar}
-              className={`w-11 h-11 rounded-full flex items-center justify-center transition-all cursor-pointer ${
-                isStarred
-                  ? 'bg-[#E8A23B]/20 border border-[#E8A23B] text-[#E8A23B] scale-110'
-                  : 'bg-white/10 border border-white/20 text-white hover:bg-white/20'
-              }`}
-            >
-              <Star className={`w-5 h-5 ${isStarred ? 'fill-current' : ''}`} />
-            </button>
-
-            <span className="text-xs text-[#B9C0E6]">
-              <strong className="text-white">{currentItem.views + (isStarred ? 1 : 0)}</strong> views
-              {isStarred && ' · ★ starred'}
-            </span>
-          </>
-        ) : (
-          <button
-            onClick={() => alert(`Opening sponsor link for: ${currentItem.sponsor}`)}
-            className="w-full bg-[#3B6BFA] hover:bg-[#2453D6] text-white font-bold py-3 rounded-full text-sm flex items-center justify-center gap-2 shadow-md cursor-pointer"
-          >
-            <span>{currentItem.cta || 'Learn more'}</span>
-            <ExternalLink className="w-4 h-4" />
-          </button>
+        {item.type !== 'text' && item.text && (
+          <p className="absolute bottom-4 left-4 right-4 z-10 text-sm bg-black/50 rounded-xl px-3 py-2 whitespace-pre-wrap">{item.text}</p>
         )}
       </div>
+
+      <div className="px-5 py-4 bg-black/40 backdrop-blur-md flex items-center justify-center z-20 min-h-[68px]">
+        {item.sponsored ? (
+          item.ctaUrl ? (
+            <button
+              onClick={() => {
+                void trackSponsored(item.sponsorId!, 'clicks');
+                window.open(item.ctaUrl, '_blank', 'noopener');
+              }}
+              className="w-full bg-brand hover:bg-brand-strong text-white font-bold py-3 rounded-full text-sm flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {item.cta || 'Learn more'} <ExternalLink className="w-4 h-4" />
+            </button>
+          ) : (
+            <span className="text-xs text-haze">{item.sponsor}</span>
+          )
+        ) : group.isMine ? (
+          <button onClick={openViewers} className="flex items-center gap-2 text-sm font-semibold cursor-pointer">
+            <Eye className="w-4 h-4" /> {item.viewers.length} view{item.viewers.length === 1 ? '' : 's'}
+          </button>
+        ) : (
+          <span className="text-xs text-haze">Tap left/right to navigate · hold to pause</span>
+        )}
+      </div>
+
+      {viewersOpen && (
+        <Sheet title={`Viewed by ${item.viewers.length}`} onClose={() => setViewersOpen(false)} z="z-[70]">
+          <div className="p-4 space-y-2 text-ink dark:text-mist">
+            {item.viewers.length === 0 && <p className="text-xs text-ink-faint text-center py-4">No views yet</p>}
+            {viewerNames.map((v) => (
+              <div key={v.uid} className="flex items-center gap-3">
+                <Avatar name={v.name} color={v.color} url={v.url} size={36} shape="circle" />
+                <span className="text-sm font-semibold">{v.name}</span>
+              </div>
+            ))}
+          </div>
+        </Sheet>
+      )}
     </div>
   );
 };

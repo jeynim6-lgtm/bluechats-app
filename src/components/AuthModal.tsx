@@ -1,401 +1,503 @@
-import React, { useState } from 'react';
-import { UserProfile, DocType } from '../types';
-import { Shield, Lock, Users, CheckCircle2, ChevronRight, ArrowLeft } from 'lucide-react';
-import { LegalModal, LegalDocType } from './LegalModals';
+import React, { useEffect, useRef, useState } from 'react';
+import { RecaptchaVerifier, signInWithPhoneNumber, type ConfirmationResult } from 'firebase/auth';
+import { ArrowLeft, Lock, Users, MessageSquareText, ShieldCheck, ChevronDown } from 'lucide-react';
+import { getFirebaseAuth } from '../lib/firebase';
+import { COUNTRIES, DEFAULT_COUNTRY, toE164, formatPhone, countryForNumber } from '../lib/phone';
+import { createProfile, countUsers } from '../services/users';
+import { submitWalletApplication } from '../services/wallet';
+import { useAuth } from '../context/AuthContext';
+import { BRANDING } from '../config/branding';
+import { LegalModal, type LegalDocType } from './LegalModals';
+import { ErrorBanner, Spinner } from './ui';
+import type { DocType } from '../types';
 
-interface AuthModalProps {
-  onComplete: (user: UserProfile) => void;
+type Step = 'phone' | 'code' | 'profile' | 'wallet' | 'done';
+
+const RESEND_SECONDS = 60;
+
+export function authErrorMessage(err: unknown): string {
+  const code = (err as { code?: string })?.code || '';
+  const messages: Record<string, string> = {
+    'auth/invalid-phone-number': 'That phone number is not valid. Check the country code and number.',
+    'auth/missing-phone-number': 'Enter your phone number.',
+    'auth/too-many-requests': 'Too many attempts from this device. Please wait a while and try again.',
+    'auth/quota-exceeded': 'The SMS quota for this app has been reached. Please try again later.',
+    'auth/invalid-verification-code': 'That code is incorrect. Check the SMS and try again.',
+    'auth/code-expired': 'This code has expired. Tap “Resend code” to get a new one.',
+    'auth/session-expired': 'This code has expired. Tap “Resend code” to get a new one.',
+    'auth/captcha-check-failed': 'The security check failed. Please try again.',
+    'auth/invalid-app-credential': 'The security check failed. Refresh the page and try again.',
+    'auth/network-request-failed': 'Network error. Check your internet connection and try again.',
+    'auth/operation-not-allowed':
+      'Phone sign-in is not enabled for this Firebase project. Enable it under Authentication → Sign-in method → Phone.',
+    'auth/unauthorized-domain': `This website (${window.location.hostname}) is not an authorised domain. Add it under Firebase Authentication → Settings → Authorized domains.`,
+    'auth/billing-not-enabled': 'SMS sign-in requires the Firebase Blaze (pay-as-you-go) plan on this project.',
+    'auth/invalid-api-key': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',
+    'auth/api-key-not-valid.-please-pass-a-valid-api-key.': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',
+  };
+  return messages[code] || (err as Error)?.message || 'Something went wrong. Please try again.';
 }
 
-export const AuthModal: React.FC<AuthModalProps> = ({ onComplete }) => {
-  // Step 1 to 5 as requested
-  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
+interface AuthModalProps {
+  /** Called when a brand-new profile is created, so the parent keeps onboarding visible. */
+  onProfileCreated: () => void;
+  onFinished: () => void;
+}
 
-  // Step 1: Phone
-  const [countryCode, setCountryCode] = useState('+27');
-  const [phone, setPhone] = useState('82 123 4567');
+export const AuthModal: React.FC<AuthModalProps> = ({ onProfileCreated, onFinished }) => {
+  const { status, firebaseUser, error: authError, signOut } = useAuth();
+  const [step, setStep] = useState<Step>(status === 'needsProfile' ? 'profile' : 'phone');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  // Step 2: Name & Recovery Email
-  const [fullName, setFullName] = useState('Lilo Banim');
-  const [recoveryEmail, setRecoveryEmail] = useState('lilobanim60@gmail.com');
+  // phone + code
+  const [dial, setDial] = useState(DEFAULT_COUNTRY.dial);
+  const [localNumber, setLocalNumber] = useState('');
+  const [e164, setE164] = useState('');
+  const [code, setCode] = useState('');
+  const [resendIn, setResendIn] = useState(0);
+  const confirmationRef = useRef<ConfirmationResult | null>(null);
+  const verifierRef = useRef<RecaptchaVerifier | null>(null);
+  const captchaHostRef = useRef<HTMLDivElement>(null);
 
-  // Step 3: OTP
-  const [otp, setOtp] = useState(['4', '2', '1', '9']);
+  // profile
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
 
-  // Step 4: Wallet Pre-registration (optional)
+  // wallet
   const [docType, setDocType] = useState<DocType>('id');
   const [docNumber, setDocNumber] = useState('');
-  const [walletTermsAgreed, setWalletTermsAgreed] = useState(false);
+  const [walletTerms, setWalletTerms] = useState(false);
   const [walletOptedIn, setWalletOptedIn] = useState(false);
+  const [userCount, setUserCount] = useState<number | null>(null);
 
-  // Legal Modal
   const [legalModal, setLegalModal] = useState<LegalDocType>(null);
 
-  const handleOtpChange = (index: number, val: string) => {
-    if (val.length > 1) val = val[val.length - 1];
-    const newOtp = [...otp];
-    newOtp[index] = val;
-    setOtp(newOtp);
-  };
+  useEffect(() => {
+    if (status === 'needsProfile' && (step === 'phone' || step === 'code')) setStep('profile');
+  }, [status, step]);
 
-  const handleFinishOnboarding = () => {
-    // If user filled wallet pre-registration, submit to API
-    if (walletOptedIn && docNumber.trim() && walletTermsAgreed) {
-      fetch('/api/wallet/apply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: fullName,
-          email: recoveryEmail,
-          phone: `${countryCode} ${phone}`,
-          docType,
-          docNumber: docNumber.trim(),
-          termsAccepted: true,
-        }),
-      }).catch(() => {});
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const id = window.setTimeout(() => setResendIn((s) => s - 1), 1000);
+    return () => window.clearTimeout(id);
+  }, [resendIn]);
+
+  useEffect(() => {
+    if (step === 'done') countUsers().then(setUserCount).catch(() => setUserCount(null));
+  }, [step]);
+
+  useEffect(() => () => verifierRef.current?.clear(), []);
+
+  const resetVerifier = () => {
+    try {
+      verifierRef.current?.clear();
+    } catch {
+      /* already cleared */
     }
-
-    const user: UserProfile = {
-      id: `usr_${Date.now()}`,
-      name: fullName || 'Blue Chats User',
-      phone: `${countryCode} ${phone}`,
-      email: recoveryEmail || undefined,
-      country: countryCode === '+27' ? 'South Africa' : countryCode === '+263' ? 'Zimbabwe' : 'Global',
-      bio: 'Hey there! I am using Blue Chats.',
-      isOnline: true,
-      role: 'user', // Roles and claims are strictly enforced and verified server-side
-    };
-
-    onComplete(user);
+    verifierRef.current = null;
   };
+
+  /** A fresh, empty element is required each time a reCAPTCHA widget is created. */
+  const getVerifier = () => {
+    if (verifierRef.current) return verifierRef.current;
+    const host = captchaHostRef.current!;
+    host.replaceChildren();
+    const el = document.createElement('div');
+    host.appendChild(el);
+    verifierRef.current = new RecaptchaVerifier(getFirebaseAuth(), el, { size: 'invisible' });
+    return verifierRef.current;
+  };
+
+  const sendCode = async () => {
+    setError('');
+    const number = toE164(localNumber, dial);
+    if (!number) {
+      setError('Enter a valid phone number, e.g. 082 123 4567.');
+      return;
+    }
+    setBusy(true);
+    try {
+      confirmationRef.current = await signInWithPhoneNumber(getFirebaseAuth(), number, getVerifier());
+      setE164(number);
+      setCode('');
+      setResendIn(RESEND_SECONDS);
+      setStep('code');
+    } catch (err) {
+      console.error('[auth] signInWithPhoneNumber failed', err);
+      setError(authErrorMessage(err));
+      resetVerifier();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyCode = async (value = code) => {
+    if (!confirmationRef.current || value.length !== 6) return;
+    setError('');
+    setBusy(true);
+    try {
+      await confirmationRef.current.confirm(value);
+      // AuthContext now loads the profile; new users are moved to the profile step automatically.
+    } catch (err) {
+      setError(authErrorMessage(err));
+      setCode('');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!firebaseUser) return;
+    const name = fullName.trim();
+    if (name.length < 2) {
+      setError('Please enter your name.');
+      return;
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setError('That email address does not look right.');
+      return;
+    }
+    const phone = firebaseUser.phoneNumber || e164;
+    setBusy(true);
+    setError('');
+    try {
+      onProfileCreated();
+      await createProfile(firebaseUser.uid, {
+        name,
+        phone,
+        email,
+        country: countryForNumber(phone)?.name || '',
+      });
+      setStep('wallet');
+    } catch (err) {
+      console.error('[auth] createProfile failed', err);
+      setError(
+        (err as { code?: string }).code === 'permission-denied'
+          ? 'Your profile could not be saved: Firestore security rules are not deployed. Run `npm run deploy:rules`.'
+          : (err as Error).message
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitWallet = async () => {
+    if (!firebaseUser) return;
+    setBusy(true);
+    setError('');
+    try {
+      await submitWalletApplication(firebaseUser.uid, {
+        name: fullName.trim(),
+        email,
+        phone: firebaseUser.phoneNumber || e164,
+        docType,
+        docNumber,
+      });
+      setWalletOptedIn(true);
+      setStep('done');
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stepNumber = { phone: 1, code: 2, profile: 3, wallet: 4, done: 5 }[step];
+  const selectedCountry = COUNTRIES.find((c) => c.dial === dial) || DEFAULT_COUNTRY;
+  const goal = BRANDING.wallet.unlockGoal;
+  const pct = userCount ? Math.min(100, (userCount / goal) * 100) : 0;
+
+  const input =
+    'w-full bg-white dark:bg-night-card border border-line dark:border-night-line rounded-xl px-4 py-3 text-sm text-ink dark:text-mist placeholder-ink-faint focus:outline-none focus:ring-2 focus:ring-brand';
+  const primary =
+    'w-full bg-brand hover:bg-brand-strong active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 text-white font-bold py-3.5 rounded-full text-sm shadow-md transition-all cursor-pointer flex items-center justify-center gap-2';
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#F4F6FC] dark:bg-[#0B1130] flex flex-col max-w-[480px] mx-auto overflow-y-auto">
-      {/* Top Banner */}
-      <div className="bg-gradient-to-br from-[#0B1330] via-[#101C42] to-[#152657] text-white px-6 pt-10 pb-7 rounded-b-[28px] shadow-lg flex-shrink-0">
+    <div className="fixed inset-0 z-50 bg-paper dark:bg-night flex flex-col max-w-[480px] mx-auto overflow-y-auto">
+      <div className="bg-gradient-to-br from-navy-950 via-navy-900 to-navy-800 text-white px-6 pt-10 pb-7 rounded-b-[28px] shadow-lg flex-shrink-0">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#4DD8E8] shadow-[0_0_8px_rgba(77,216,232,0.8)]"></span>
-            <span className="font-serif-brand italic font-semibold text-2xl tracking-tight">
-              Blue Chats
-            </span>
+            <span className="w-2.5 h-2.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)]" />
+            <span className="font-serif-brand italic font-semibold text-2xl tracking-tight">{BRANDING.appName}</span>
           </div>
-          <span className="text-[11px] font-mono font-bold bg-white/10 px-2.5 py-0.5 rounded-full text-[#4DD8E8]">
-            Step {step} of 5
-          </span>
+          <span className="text-[11px] font-mono font-bold bg-white/10 px-2.5 py-0.5 rounded-full text-accent">Step {stepNumber} of 5</span>
         </div>
-
-        {step === 1 && (
-          <p className="text-[#B9C0E6] text-xs mt-1">
-            Step 1: Enter your phone number with international country code.
-          </p>
-        )}
-        {step === 2 && (
-          <p className="text-[#B9C0E6] text-xs mt-1">
-            Step 2: Tell us your full legal name and a recovery email address.
-          </p>
-        )}
-        {step === 3 && (
-          <p className="text-[#B9C0E6] text-xs mt-1">
-            Step 3: Enter the 4-digit verification code sent to {countryCode} {phone}.
-          </p>
-        )}
-        {step === 4 && (
-          <p className="text-[#B9C0E6] text-xs mt-1">
-            Step 4: Blue Chats Wallet pre-registration (Optional).
-          </p>
-        )}
-        {step === 5 && (
-          <p className="text-[#B9C0E6] text-xs mt-1">
-            Step 5: Wallet unlocks at 50,000 verified users.
-          </p>
-        )}
+        <p className="text-haze text-xs mt-1">
+          {step === 'phone' && 'Sign in or create an account with your phone number.'}
+          {step === 'code' && `Enter the 6-digit code we sent by SMS to ${formatPhone(e164)}.`}
+          {step === 'profile' && 'Tell people who you are.'}
+          {step === 'wallet' && `${BRANDING.appName} Wallet pre-registration (optional).`}
+          {step === 'done' && `Wallet unlocks at ${goal.toLocaleString()} users.`}
+        </p>
       </div>
 
-      {/* Form Content */}
-      <div className="flex-1 p-6">
-        {/* STEP 1: Phone number with country code */}
-        {step === 1 && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-[#5A6182] dark:text-[#AEB4DA] uppercase tracking-wider mb-2">
-                Phone Number &amp; Country Code
-              </label>
-              <div className="flex gap-2">
+      <div className="flex-1 p-6 space-y-4">
+        {(error || authError) && <ErrorBanner message={error || authError || ''} onDismiss={error ? () => setError('') : undefined} />}
+
+        {step === 'phone' && (
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void sendCode();
+            }}
+          >
+            <label className="block text-xs font-bold text-ink-soft dark:text-mist-soft uppercase tracking-wider">Phone number</label>
+            <div className="flex gap-2">
+              {/* Compact "🇿🇦 +27" face over a native select that lists full country names */}
+              <label className="relative flex items-center gap-1 bg-white dark:bg-night-card border border-line dark:border-night-line rounded-xl px-3 text-sm font-semibold text-ink dark:text-mist focus-within:ring-2 focus-within:ring-brand cursor-pointer flex-shrink-0">
+                <span aria-hidden="true">
+                  {selectedCountry.flag} {selectedCountry.dial}
+                </span>
+                <ChevronDown className="w-3.5 h-3.5 text-ink-faint" aria-hidden="true" />
                 <select
-                  value={countryCode}
-                  onChange={(e) => setCountryCode(e.target.value)}
-                  className="bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-xl px-3 py-3 text-xs font-semibold text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
+                  value={`${dial}|${selectedCountry.iso}`}
+                  onChange={(e) => setDial(e.target.value.split('|')[0])}
+                  aria-label="Country code"
+                  className="absolute inset-0 opacity-0 cursor-pointer"
                 >
-                  <option value="+27">🇿🇦 South Africa (+27)</option>
-                  <option value="+263">🇿🇼 Zimbabwe (+263)</option>
-                  <option value="+258">🇲🇿 Mozambique (+258)</option>
-                  <option value="+267">🇧🇼 Botswana (+267)</option>
-                  <option value="+234">🇳🇬 Nigeria (+234)</option>
-                  <option value="+254">🇰🇪 Kenya (+254)</option>
-                  <option value="+44">🇬🇧 United Kingdom (+44)</option>
-                  <option value="+1">🇺🇸 United States (+1)</option>
+                  {COUNTRIES.map((c) => (
+                    <option key={c.iso} value={`${c.dial}|${c.iso}`}>
+                      {c.flag} {c.name} ({c.dial})
+                    </option>
+                  ))}
                 </select>
-
-                <input
-                  type="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="82 123 4567"
-                  className="flex-1 bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-xl px-4 py-3 text-sm font-medium text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
-                />
-              </div>
+              </label>
+              <input
+                type="tel"
+                inputMode="tel"
+                autoComplete="tel-national"
+                value={localNumber}
+                onChange={(e) => setLocalNumber(e.target.value)}
+                placeholder="82 123 4567"
+                className={`${input} flex-1`}
+                autoFocus
+                name="phone"
+              />
             </div>
+            <p className="text-[11px] text-ink-faint">We'll send a one-time verification code by SMS. Standard SMS rates may apply.</p>
 
-            <button
-              onClick={() => setStep(2)}
-              className="w-full bg-[#3B6BFA] hover:bg-[#2453D6] active:scale-[0.98] text-white font-bold py-3.5 rounded-full text-sm mt-6 shadow-md transition-all cursor-pointer"
-            >
-              Continue to Name &amp; Email →
+            <button type="submit" disabled={busy || !localNumber.trim()} className={primary} id="send-code-button">
+              {busy ? <Spinner className="w-4 h-4 text-white" /> : <MessageSquareText className="w-4 h-4" />}
+              <span>{busy ? 'Sending code…' : 'Send verification code'}</span>
             </button>
-
-            <p className="text-[11px] text-[#9AA1C4] dark:text-[#7A81A8] text-center leading-relaxed mt-4">
+            <p className="text-[11px] text-ink-faint dark:text-mist-faint text-center leading-relaxed">
               By continuing you agree to the{' '}
-              <button
-                type="button"
-                onClick={() => setLegalModal('terms')}
-                className="text-[#3B6BFA] underline font-bold"
-              >
+              <button type="button" onClick={() => setLegalModal('terms')} className="text-brand underline font-bold">
                 Terms of Service
               </button>{' '}
               and{' '}
-              <button
-                type="button"
-                onClick={() => setLegalModal('privacy')}
-                className="text-[#3B6BFA] underline font-bold"
-              >
+              <button type="button" onClick={() => setLegalModal('privacy')} className="text-brand underline font-bold">
                 Privacy Policy
               </button>
               .
             </p>
-          </div>
-        )}
-
-        {/* STEP 2: Name and recovery email */}
-        {step === 2 && (
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-[#5A6182] dark:text-[#AEB4DA] uppercase tracking-wider mb-1.5">
-                Full Legal Name
-              </label>
-              <input
-                type="text"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="e.g. Lilo Banim"
-                className="w-full bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-xl px-4 py-3 text-sm text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-[#5A6182] dark:text-[#AEB4DA] uppercase tracking-wider mb-1.5">
-                Recovery Email Address
-              </label>
-              <input
-                type="email"
-                value={recoveryEmail}
-                onChange={(e) => setRecoveryEmail(e.target.value)}
-                placeholder="you@email.com"
-                className="w-full bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-xl px-4 py-3 text-sm text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
-              />
-              <p className="text-[10px] text-[#9AA1C4] mt-1">
-                Used strictly for account recovery and two-factor authentication.
-              </p>
-            </div>
-
-            <button
-              onClick={() => setStep(3)}
-              className="w-full bg-[#3B6BFA] hover:bg-[#2453D6] active:scale-[0.98] text-white font-bold py-3.5 rounded-full text-sm mt-4 shadow-md transition-all cursor-pointer"
-            >
-              Send OTP Code →
-            </button>
-
-            <button
-              onClick={() => setStep(1)}
-              className="w-full py-2.5 text-xs text-[#5A6182] dark:text-[#AEB4DA] font-semibold flex items-center justify-center gap-1 cursor-pointer"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" /> Back to Phone
-            </button>
-          </div>
-        )}
-
-        {/* STEP 3: Send OTP code, verify */}
-        {step === 3 && (
-          <div className="space-y-4 text-center">
-            <p className="text-xs text-[#5A6182] dark:text-[#AEB4DA]">
-              Enter the 4-digit code sent via SMS to {countryCode} {phone}
+            <p className="text-[10px] text-ink-faint dark:text-mist-faint text-center">
+              Protected by reCAPTCHA — the Google{' '}
+              <a className="underline" href="https://policies.google.com/privacy" target="_blank" rel="noreferrer">
+                Privacy Policy
+              </a>{' '}
+              and{' '}
+              <a className="underline" href="https://policies.google.com/terms" target="_blank" rel="noreferrer">
+                Terms
+              </a>{' '}
+              apply.
             </p>
-
-            <div className="flex justify-center gap-3 my-6">
-              {otp.map((digit, idx) => (
-                <input
-                  key={idx}
-                  type="text"
-                  maxLength={1}
-                  value={digit}
-                  onChange={(e) => handleOtpChange(idx, e.target.value)}
-                  className="w-12 h-14 text-center text-xl font-bold rounded-xl border border-[#E4E8F7] dark:border-[#242D57] bg-white dark:bg-[#131B3E] text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
-                />
-              ))}
-            </div>
-
-            <button
-              onClick={() => alert('New OTP code dispatched to ' + phone)}
-              className="text-xs font-bold text-[#3B6BFA] hover:underline cursor-pointer block mx-auto"
-            >
-              Resend code
-            </button>
-
-            <button
-              onClick={() => setStep(4)}
-              className="w-full bg-[#3B6BFA] hover:bg-[#2453D6] active:scale-[0.98] text-white font-bold py-3.5 rounded-full text-sm mt-4 shadow-md transition-all cursor-pointer"
-            >
-              Verify Code →
-            </button>
-
-            <button
-              onClick={() => setStep(2)}
-              className="w-full py-2.5 text-xs text-[#5A6182] dark:text-[#AEB4DA] font-semibold cursor-pointer"
-            >
-              Back
-            </button>
-          </div>
+          </form>
         )}
 
-        {/* STEP 4: Wallet pre-registration (ID / passport / driver's licence / asylum doc) */}
-        {step === 4 && (
-          <div className="space-y-3.5">
-            <div className="p-3 bg-[#3B6BFA]/10 border border-[#3B6BFA]/20 rounded-2xl">
-              <span className="font-bold text-xs text-[#3B6BFA] block mb-0.5">
-                Optional Wallet Pre-Registration
-              </span>
-              <p className="text-[11px] text-[#5A6182] dark:text-[#AEB4DA] leading-relaxed">
-                Provide identity documentation to pre-register your eligibility for the upcoming Blue Chats Wallet.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-[#5A6182] dark:text-[#AEB4DA] uppercase tracking-wider mb-1.5">
-                Identification Document Type
-              </label>
-              <select
-                value={docType}
-                onChange={(e) => setDocType(e.target.value as DocType)}
-                className="w-full bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-xl px-3.5 py-2.5 text-xs font-semibold text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
-              >
-                <option value="id">🇿🇦 National ID Number</option>
-                <option value="passport">🌍 Passport Number</option>
-                <option value="drivers_licence">🚗 Driver’s Licence Number</option>
-                <option value="asylum_doc">📄 Asylum / Refugee Documentation Number</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-[#5A6182] dark:text-[#AEB4DA] uppercase tracking-wider mb-1.5">
-                Document Number
-              </label>
-              <input
-                type="text"
-                value={docNumber}
-                onChange={(e) => setDocNumber(e.target.value)}
-                placeholder="Enter ID, Passport, Driver's Licence, or Asylum Permit #"
-                className="w-full bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-xl px-4 py-2.5 text-xs font-mono text-[#0E1430] dark:text-[#EEF1FF] focus:outline-none focus:ring-2 focus:ring-[#3B6BFA]"
-              />
-            </div>
-
-            {/* Terms checkbox */}
-            <div className="p-3 bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-2xl">
-              <label className="flex items-start gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={walletTermsAgreed}
-                  onChange={(e) => setWalletTermsAgreed(e.target.checked)}
-                  className="mt-0.5 w-4 h-4 accent-[#3B6BFA] rounded"
-                />
-                <span className="text-[11px] text-[#5A6182] dark:text-[#AEB4DA] leading-relaxed">
-                  I agree to the Blue Chats Wallet Terms of Service. I understand this only pre-registers my interest and does not unlock financial features yet.
-                </span>
-              </label>
-            </div>
-
-            <button
-              onClick={() => {
-                setWalletOptedIn(true);
-                setStep(5);
+        {step === 'code' && (
+          <form
+            className="space-y-4 text-center"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void verifyCode();
+            }}
+          >
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="\d{6}"
+              maxLength={6}
+              value={code}
+              onChange={(e) => {
+                const v = e.target.value.replace(/\D/g, '').slice(0, 6);
+                setCode(v);
+                if (v.length === 6) void verifyCode(v);
               }}
-              disabled={!docNumber.trim() || !walletTermsAgreed}
-              className="w-full bg-[#3B6BFA] hover:bg-[#2453D6] disabled:opacity-40 text-white font-bold py-3.5 rounded-full text-xs shadow-md transition-all cursor-pointer"
-            >
-              Pre-Register &amp; Proceed →
+              placeholder="••••••"
+              aria-label="6-digit verification code"
+              name="otp"
+              autoFocus
+              className="w-full max-w-[260px] mx-auto block text-center text-3xl tracking-[0.5em] font-bold font-mono bg-white dark:bg-night-card border border-line dark:border-night-line rounded-2xl py-4 text-ink dark:text-mist focus:outline-none focus:ring-2 focus:ring-brand"
+            />
+
+            <button type="submit" disabled={busy || code.length !== 6} className={primary}>
+              {busy ? <Spinner className="w-4 h-4 text-white" /> : <ShieldCheck className="w-4 h-4" />}
+              <span>{busy ? 'Verifying…' : 'Verify code'}</span>
             </button>
 
-            {/* Clear "No wallet needed for now" option */}
-            <div className="pt-2 text-center">
+            <div className="flex items-center justify-between text-xs">
               <button
                 type="button"
                 onClick={() => {
-                  setWalletOptedIn(false);
-                  setStep(5);
+                  setStep('phone');
+                  setError('');
+                  resetVerifier();
                 }}
-                className="text-xs font-bold text-[#5A6182] dark:text-[#AEB4DA] hover:text-[#3B6BFA] underline cursor-pointer"
+                className="text-ink-soft dark:text-mist-soft font-semibold flex items-center gap-1 cursor-pointer"
               >
-                No wallet needed for now →
+                <ArrowLeft className="w-3.5 h-3.5" /> Change number
+              </button>
+              <button
+                type="button"
+                disabled={resendIn > 0 || busy}
+                onClick={() => {
+                  resetVerifier();
+                  void sendCode();
+                }}
+                className="font-bold text-brand disabled:text-ink-faint cursor-pointer disabled:cursor-default"
+              >
+                {resendIn > 0 ? `Resend code in ${resendIn}s` : 'Resend code'}
               </button>
             </div>
+          </form>
+        )}
+
+        {step === 'profile' && (
+          <form className="space-y-4" onSubmit={saveProfile}>
+            <div className="p-3 rounded-2xl bg-success/10 text-success text-xs font-semibold flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4" />
+              <span>Verified {firebaseUser?.phoneNumber ? formatPhone(firebaseUser.phoneNumber) : 'phone number'}</span>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-ink-soft dark:text-mist-soft uppercase tracking-wider mb-1.5">Your name</label>
+              <input
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                placeholder="e.g. Naledi Mokoena"
+                maxLength={60}
+                autoComplete="name"
+                name="name"
+                autoFocus
+                className={input}
+              />
+              <p className="text-[10px] text-ink-faint mt-1">Shown to people you chat with.</p>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-ink-soft dark:text-mist-soft uppercase tracking-wider mb-1.5">
+                Recovery email <span className="normal-case font-normal">(optional)</span>
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@email.com"
+                autoComplete="email"
+                name="email"
+                className={input}
+              />
+              <p className="text-[10px] text-ink-faint mt-1">Private — only you and support can see it.</p>
+            </div>
+            <button type="submit" disabled={busy} className={primary}>
+              {busy && <Spinner className="w-4 h-4 text-white" />}
+              <span>{busy ? 'Creating your account…' : 'Continue →'}</span>
+            </button>
+            <button type="button" onClick={() => void signOut()} className="w-full py-2 text-xs text-ink-soft dark:text-mist-soft font-semibold cursor-pointer">
+              Use a different number
+            </button>
+          </form>
+        )}
+
+        {step === 'wallet' && (
+          <div className="space-y-3.5">
+            <div className="p-3 bg-brand/10 border border-brand/20 rounded-2xl">
+              <span className="font-bold text-xs text-brand block mb-0.5">Optional wallet pre-registration</span>
+              <p className="text-[11px] text-ink-soft dark:text-mist-soft leading-relaxed">
+                Register your interest for the {BRANDING.appName} Wallet. Only a masked version of your document number is stored — the
+                full number never leaves this device.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-ink-soft dark:text-mist-soft uppercase tracking-wider mb-1.5">Document type</label>
+              <select value={docType} onChange={(e) => setDocType(e.target.value as DocType)} className={input}>
+                <option value="id">National ID number</option>
+                <option value="passport">Passport number</option>
+                <option value="drivers_licence">Driver’s licence number</option>
+                <option value="asylum_doc">Asylum / refugee document number</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-ink-soft dark:text-mist-soft uppercase tracking-wider mb-1.5">Document number</label>
+              <input value={docNumber} onChange={(e) => setDocNumber(e.target.value)} className={`${input} font-mono`} placeholder="Document number" />
+            </div>
+            <label className="flex items-start gap-2.5 p-3 bg-white dark:bg-night-card border border-line dark:border-night-line rounded-2xl cursor-pointer">
+              <input type="checkbox" checked={walletTerms} onChange={(e) => setWalletTerms(e.target.checked)} className="mt-0.5 w-4 h-4 accent-brand" />
+              <span className="text-[11px] text-ink-soft dark:text-mist-soft leading-relaxed">
+                I agree to the Wallet{' '}
+                <button type="button" className="text-brand underline font-bold" onClick={() => setLegalModal('terms')}>
+                  Terms
+                </button>
+                . This only registers interest and does not unlock financial features yet.
+              </span>
+            </label>
+            <button onClick={submitWallet} disabled={busy || docNumber.trim().length < 5 || !walletTerms} className={primary}>
+              {busy && <Spinner className="w-4 h-4 text-white" />}
+              <span>Pre-register &amp; continue →</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setWalletOptedIn(false);
+                setStep('done');
+              }}
+              className="w-full pt-1 text-xs font-bold text-ink-soft dark:text-mist-soft hover:text-brand underline cursor-pointer"
+            >
+              No wallet needed for now →
+            </button>
           </div>
         )}
 
-        {/* STEP 5: "Coming soon" notice (wallet unlocks at 50,000 users) with Continue button */}
-        {step === 5 && (
+        {step === 'done' && (
           <div className="space-y-5 text-center py-2">
-            <div className="w-16 h-16 rounded-3xl bg-[#3B6BFA]/10 text-[#3B6BFA] flex items-center justify-center mx-auto shadow-inner">
+            <div className="w-16 h-16 rounded-3xl bg-brand/10 text-brand flex items-center justify-center mx-auto">
               <Lock className="w-8 h-8" />
             </div>
-
             <div>
-              <div className="inline-block bg-amber-500/10 text-amber-600 dark:text-amber-400 font-bold text-[10px] uppercase px-3 py-1 rounded-full mb-2">
-                Blue Chats Wallet — Coming Soon
+              <div className="inline-block bg-gold/10 text-gold font-bold text-[10px] uppercase px-3 py-1 rounded-full mb-2">
+                {BRANDING.appName} Wallet — coming soon
               </div>
-              <h2 className="font-bold text-lg text-[#0E1430] dark:text-[#EEF1FF]">
-                Unlocks at 50,000 Users
-              </h2>
-              <p className="text-xs text-[#5A6182] dark:text-[#AEB4DA] max-w-xs mx-auto mt-1 leading-relaxed">
+              <h2 className="font-bold text-lg text-ink dark:text-mist">You're all set!</h2>
+              <p className="text-xs text-ink-soft dark:text-mist-soft max-w-xs mx-auto mt-1 leading-relaxed">
                 {walletOptedIn
-                  ? 'Your pre-registration has been securely filed. Wallet features will unlock automatically once our community milestone is reached.'
-                  : 'You have skipped wallet setup for now. You can chat, post on Discover, and join calls with no limits.'}
+                  ? 'Your pre-registration is saved. Wallet features unlock automatically when we reach our community milestone.'
+                  : 'You can chat, call, post on Discover and share status updates right away.'}
               </p>
             </div>
-
-            {/* 50,000 Progress preview */}
-            <div className="bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-2xl p-4 text-left space-y-2">
+            <div className="bg-white dark:bg-night-card border border-line dark:border-night-line rounded-2xl p-4 text-left space-y-2">
               <div className="flex justify-between text-xs">
-                <span className="font-semibold text-[#5A6182] dark:text-[#AEB4DA] flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-[#3B6BFA]" />
-                  <span>Activation Progress</span>
+                <span className="font-semibold text-ink-soft dark:text-mist-soft flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-brand" /> Community progress
                 </span>
-                <span className="font-bold font-mono">1,847 / 50,000</span>
+                <span className="font-bold font-mono">
+                  {userCount === null ? '…' : userCount.toLocaleString()} / {goal.toLocaleString()}
+                </span>
               </div>
-              <div className="h-2.5 w-full bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
-                <div className="h-full bg-[#3B6BFA] rounded-full w-[3.7%]" />
+              <div className="h-2.5 w-full bg-line dark:bg-night-line rounded-full overflow-hidden">
+                <div className="h-full bg-brand rounded-full transition-all duration-700" style={{ width: `${Math.max(pct, 1)}%` }} />
               </div>
             </div>
-
-            {/* Required: A "Continue" button at the very bottom moves them into the app regardless of what they chose on the wallet step */}
-            <button
-              onClick={handleFinishOnboarding}
-              className="w-full bg-[#3B6BFA] hover:bg-[#2453D6] active:scale-[0.98] text-white font-extrabold py-4 rounded-full text-sm shadow-xl transition-all cursor-pointer mt-6"
-            >
-              Continue to Blue Chats →
+            <button onClick={onFinished} className={primary}>
+              Continue to {BRANDING.appName} →
             </button>
           </div>
         )}
       </div>
 
+      <div ref={captchaHostRef} aria-hidden="true" />
       <LegalModal type={legalModal} onClose={() => setLegalModal(null)} />
     </div>
   );

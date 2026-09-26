@@ -1,84 +1,320 @@
 rules_version = '2';
 
+// Blue Chats — Firestore security rules.
+// Deploy with:  npx firebase-tools deploy --only firestore:rules,firestore:indexes
+// Test with:    npm run test:rules
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Default deny all
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    function isSignedIn() {
+    // ---------- helpers ----------
+    function signedIn() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
+    function isUser(uid) {
+      return signedIn() && request.auth.uid == uid;
     }
 
-    // User profiles
-    match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create, update: if isOwner(userId);
+    function isCeo() {
+      return signedIn() && (request.auth.token.get('ceo', false) == true || request.auth.token.get('role', '') == 'ceo');
     }
 
-    // Chats & Messages
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function isShortString(value, max) {
+      return value is string && value.size() <= max;
+    }
+
+    function optionalString(field, max) {
+      return !(field in incoming()) || incoming()[field] == null || isShortString(incoming()[field], max);
+    }
+
+    // ---------- users ----------
+    // Public profile: name, bio, avatar, country, presence. No phone numbers here.
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isUser(uid)
+        && incoming().uid == uid
+        && isShortString(incoming().name, 60) && incoming().name.size() > 0
+        && optionalString('bio', 160)
+        && optionalString('avatarUrl', 500)
+        && optionalString('country', 60)
+        && !('role' in incoming()) && !('ceo' in incoming()) && !('admin' in incoming());
+      allow delete: if isUser(uid);
+
+      // Private account data (phone, email, blocked list, preferences).
+      match /private/{docId} {
+        allow read: if isUser(uid) || isCeo();
+        allow write: if isUser(uid);
+      }
+
+      // Personal address book, follows and starred Discover posts.
+      match /{sub}/{docId} {
+        allow read, write: if isUser(uid) && sub in ['contacts', 'following', 'stars'];
+      }
+    }
+
+    // Phone number → uid lookup. Exact-match `get` only: numbers cannot be enumerated.
+    // Only the verified owner of a phone number (from SMS sign-in) can claim it.
+    match /phoneIndex/{phone} {
+      allow get: if signedIn();
+      allow list: if isCeo();
+      allow create, update: if signedIn()
+        && request.auth.token.get('phone_number', '') == phone
+        && incoming().uid == request.auth.uid;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // ---------- chats ----------
+    function chatDoc(chatId) {
+      return get(/databases/$(database)/documents/chats/$(chatId));
+    }
+
+    function isChatMember(chatId) {
+      return signedIn() && request.auth.uid in chatDoc(chatId).data.participants;
+    }
+
     match /chats/{chatId} {
-      allow read, write: if isSignedIn();
+      // `resource == null` lets a client check whether a direct chat exists before creating it.
+      allow get: if signedIn() && (resource == null || request.auth.uid in resource.data.participants);
+      allow list: if signedIn() && request.auth.uid in resource.data.participants;
+
+      allow create: if signedIn()
+        && incoming().createdBy == request.auth.uid
+        && request.auth.uid in incoming().participants
+        && incoming().participants.size() >= 2
+        && incoming().participants.size() <= 64
+        && incoming().type in ['direct', 'group']
+        && (incoming().type == 'group'
+            || (incoming().participants.size() == 2
+                && chatId in ['dm_' + incoming().participants[0] + '_' + incoming().participants[1],
+                              'dm_' + incoming().participants[1] + '_' + incoming().participants[0]]))
+        && optionalString('name', 80);
+
+      allow update: if signedIn()
+        && request.auth.uid in resource.data.participants
+        && incoming().type == resource.data.type
+        && incoming().createdBy == resource.data.createdBy
+        && (incoming().participants == resource.data.participants
+            // group members may leave (remove only themselves)
+            || (resource.data.type == 'group'
+                && incoming().participants == resource.data.participants.removeAll([request.auth.uid])))
+        && optionalString('name', 80);
 
       match /messages/{messageId} {
-        allow read, write: if isSignedIn();
+        allow read: if isChatMember(chatId);
+
+        allow create: if isChatMember(chatId)
+          && incoming().senderId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().type in ['text', 'voice', 'image', 'video', 'file', 'location', 'contact', 'system']
+          && optionalString('text', 4000)
+          && (!('deleted' in incoming()) || incoming().deleted == false);
+
+        allow update: if isChatMember(chatId) && (
+          // react: change only your own entry in `reactions`
+          (changed().hasOnly(['reactions'])
+            && incoming().reactions.diff(resource.data.get('reactions', {})).affectedKeys().hasOnly([request.auth.uid]))
+          ||
+          // delete for everyone: sender wipes content
+          (resource.data.senderId == request.auth.uid
+            && changed().hasOnly(['deleted', 'text', 'media', 'location', 'contact', 'replyTo', 'reactions'])
+            && incoming().deleted == true)
+        );
+
+        allow delete: if false;
       }
     }
 
-    // Discover Feed Posts
+    // ---------- calls (WebRTC signaling + history) ----------
+    function callDoc(callId) {
+      return get(/databases/$(database)/documents/calls/$(callId));
+    }
+
+    function isCallParty(data) {
+      return signedIn() && (request.auth.uid == data.callerId || request.auth.uid == data.calleeId);
+    }
+
+    match /calls/{callId} {
+      allow read: if signedIn() && (
+        request.auth.uid == resource.data.callerId
+        || request.auth.uid == resource.data.calleeId
+        || request.auth.uid in resource.data.participants);
+
+      allow create: if signedIn()
+        && incoming().callerId == request.auth.uid
+        && incoming().calleeId is string
+        && incoming().calleeId != request.auth.uid
+        && incoming().participants == [incoming().callerId, incoming().calleeId]
+        && incoming().status == 'ringing'
+        && incoming().type in ['voice', 'video']
+        && incoming().createdAt == request.time;
+
+      allow update: if isCallParty(resource.data)
+        && incoming().callerId == resource.data.callerId
+        && incoming().calleeId == resource.data.calleeId
+        && incoming().participants == resource.data.participants
+        && incoming().type == resource.data.type
+        && incoming().status in ['ringing', 'accepted', 'declined', 'ended', 'missed', 'busy', 'failed', 'cancelled'];
+
+      allow delete: if false;
+
+      match /callerCandidates/{candidateId} {
+        allow read: if isCallParty(callDoc(callId).data);
+        allow create: if signedIn() && callDoc(callId).data.callerId == request.auth.uid;
+      }
+
+      match /calleeCandidates/{candidateId} {
+        allow read: if isCallParty(callDoc(callId).data);
+        allow create: if signedIn() && callDoc(callId).data.calleeId == request.auth.uid;
+      }
+    }
+
+    // ---------- status stories (expire after 24h) ----------
+    match /statuses/{statusId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && incoming().authorId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().expiresAt <= request.time + duration.value(25, 'h')
+        && incoming().viewers == []
+        && incoming().type in ['text', 'image', 'video']
+        && optionalString('text', 700);
+
+      allow update: if signedIn() && (
+        // author may edit freely (except identity)
+        (resource.data.authorId == request.auth.uid && incoming().authorId == resource.data.authorId)
+        ||
+        // viewers can only add themselves to `viewers`
+        (changed().hasOnly(['viewers'])
+          && incoming().viewers.toSet().difference(resource.data.viewers.toSet()) == [request.auth.uid].toSet()
+          && incoming().viewers.toSet().hasAll(resource.data.viewers.toSet()))
+      );
+
+      allow delete: if signedIn() && resource.data.authorId == request.auth.uid;
+    }
+
+    // ---------- Discover feed ----------
     match /discoverPosts/{postId} {
-      allow read: if true; // Public For You feed
-      allow create: if isSignedIn();
-      allow update, delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+      function myStar() {
+        return /databases/$(database)/documents/users/$(request.auth.uid)/stars/$(postId);
+      }
+
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().starCount == 0 && incoming().commentCount == 0 && incoming().viewCount == 0
+        && incoming().mediaType in ['image', 'video']
+        && isShortString(incoming().caption, 2200);
+
+      allow update: if signedIn() && (
+        // author edits caption / country
+        (resource.data.uid == request.auth.uid && changed().hasOnly(['caption', 'country', 'countryCode'])
+          && isShortString(incoming().caption, 2200))
+        // star / unstar — counter must match the caller's own star marker
+        || (changed().hasOnly(['starCount'])
+            && ((incoming().starCount == resource.data.starCount + 1 && !exists(myStar()) && existsAfter(myStar()))
+             || (incoming().starCount == resource.data.starCount - 1 && exists(myStar()) && !existsAfter(myStar()))))
+        // view counter
+        || (changed().hasOnly(['viewCount']) && incoming().viewCount == resource.data.viewCount + 1)
+        // comment counter
+        || (changed().hasOnly(['commentCount'])
+            && (incoming().commentCount == resource.data.commentCount + 1
+                || incoming().commentCount == resource.data.commentCount - 1))
+      );
+
+      allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isCeo());
 
       match /comments/{commentId} {
-        allow read: if true;
-        allow create: if isSignedIn();
-      }
-
-      match /views/{viewId} {
-        allow read, write: if true;
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && incoming().uid == request.auth.uid
+          && incoming().createdAt == request.time
+          && isShortString(incoming().text, 1000) && incoming().text.size() > 0;
+        allow delete: if signedIn() && (
+          resource.data.uid == request.auth.uid
+          || get(/databases/$(database)/documents/discoverPosts/$(postId)).data.uid == request.auth.uid
+          || isCeo());
       }
     }
 
-    // Friend Requests
+    // ---------- friend requests ----------
     match /friendRequests/{requestId} {
-      allow read, write: if isSignedIn();
+      allow read: if signedIn() && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
+
+      allow create: if signedIn()
+        && incoming().fromUid == request.auth.uid
+        && incoming().toUid != request.auth.uid
+        && requestId == incoming().fromUid + '_' + incoming().toUid
+        && incoming().status == 'pending';
+
+      allow update: if signedIn() && (
+        // recipient accepts / declines
+        (resource.data.toUid == request.auth.uid
+          && changed().hasOnly(['status', 'respondedAt'])
+          && incoming().status in ['accepted', 'declined'])
+        ||
+        // sender re-sends after a decline
+        (resource.data.fromUid == request.auth.uid
+          && changed().hasOnly(['status', 'createdAt', 'from', 'respondedAt'])
+          && incoming().status == 'pending')
+      );
+
+      allow delete: if signedIn() && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
     }
 
-    // Wallet applicants pre-registration
-    match /walletApplicants/{applicantId} {
-      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || request.auth.token.role == 'ceo' || request.auth.token.role == 'admin');
-      allow create: if true;
+    // ---------- wallet pre-registration (one per user; document number stored masked only) ----------
+    match /walletApplicants/{uid} {
+      allow read: if isUser(uid) || isCeo();
+      allow create, update: if isUser(uid)
+        && incoming().uid == uid
+        && incoming().termsAccepted == true
+        && incoming().status == 'pre-registered'
+        && incoming().docType in ['id', 'passport', 'drivers_licence', 'asylum_doc']
+        && isShortString(incoming().docNumberMasked, 40);
+      allow delete: if isUser(uid);
     }
 
-    // Bug Reports
+    // ---------- moderation & admin ----------
     match /bugReports/{reportId} {
-      allow create: if true;
-      allow read: if isSignedIn();
+      allow create: if signedIn()
+        && incoming().uid == request.auth.uid
+        && incoming().status == 'open'
+        && isShortString(incoming().description, 4000);
+      allow read, update, delete: if isCeo();
     }
 
-    // Admin audit access log
+    match /reports/{reportId} {
+      allow create: if signedIn() && incoming().reporterId == request.auth.uid && incoming().status == 'open';
+      allow read, update, delete: if isCeo();
+    }
+
     match /adminAccessLog/{logId} {
-      allow read, write: if isSignedIn();
+      allow create: if isCeo() && incoming().adminUid == request.auth.uid;
+      allow read: if isCeo();
     }
 
-    // Status stories
-    match /statusUpdates/{statusId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
-      allow update, delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
-    }
-
-    // Call history
-    match /calls/{callId} {
-      allow read, write: if isSignedIn();
+    // Sponsored-status analytics: signed-in users may only add +1 impression/click.
+    match /adStats/{statId} {
+      function bumpedByAtMostOne(field) {
+        return incoming()[field] == resource.data[field] || incoming()[field] == resource.data[field] + 1;
+      }
+      allow read: if isCeo();
+      allow create: if signedIn()
+        && incoming().impressions in [0, 1] && incoming().clicks in [0, 1]
+        && incoming().keys().hasOnly(['adId', 'month', 'impressions', 'clicks']);
+      allow update: if signedIn()
+        && changed().hasOnly(['impressions', 'clicks'])
+        && bumpedByAtMostOne('impressions') && bumpedByAtMostOne('clicks');
     }
   }
 }

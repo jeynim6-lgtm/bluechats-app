@@ -1,184 +1,151 @@
-import React, { useState, useRef } from 'react';
-import { X, Image as ImageIcon, Send, Palette, Loader2 } from 'lucide-react';
-import { uploadToBunny } from '../services/bunnyStorage';
-import { StatusItem } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import { Image as ImageIcon, Send, Palette, Type } from 'lucide-react';
+import { useMe } from '../context/AuthContext';
+import { postStatus } from '../services/status';
+import { uploadMedia, compressImage } from '../lib/media';
+import { BRANDING } from '../config/branding';
+import { Sheet, Spinner, ErrorBanner, toast } from './ui';
 
 interface StatusComposerProps {
+  initialMode: 'text' | 'media';
   onClose: () => void;
-  onPostStatus: (item: Partial<StatusItem>) => void;
 }
 
-const COLOR_PALETTES = [
-  '#2453D6',
-  '#8A6CF2',
-  '#34B3A0',
-  '#E8A23B',
-  '#101C42',
-  '#E15B5B',
-  '#0B1330',
-];
-
-export const StatusComposer: React.FC<StatusComposerProps> = ({ onClose, onPostStatus }) => {
+export const StatusComposer: React.FC<StatusComposerProps> = ({ initialMode, onClose }) => {
+  const me = useMe();
   const [mode, setMode] = useState<'text' | 'media'>('text');
-  const [statusText, setStatusText] = useState('');
-  const [selectedBg, setSelectedBg] = useState(COLOR_PALETTES[0]);
-  const [selectedMedia, setSelectedMedia] = useState<File | null>(null);
-  const [mediaPreview, setMediaPreview] = useState<string | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
+  const [text, setText] = useState('');
+  const [bg, setBg] = useState(BRANDING.statusBackgrounds[0]);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (initialMode === 'media') fileRef.current?.click();
+  }, [initialMode]);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedMedia(file);
-      setMediaPreview(URL.createObjectURL(file));
-      setMode('media');
-    }
+  useEffect(() => () => {
+    if (preview) URL.revokeObjectURL(preview);
+  }, [preview]);
+
+  const pick = (f: File | undefined) => {
+    if (!f) return;
+    if (!f.type.startsWith('image/') && !f.type.startsWith('video/')) return setError('Choose a photo or video.');
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+    setMode('media');
+    setError('');
   };
 
-  const handleSubmit = async () => {
-    if (mode === 'text' && !statusText.trim()) return;
-
-    if (mode === 'media' && selectedMedia) {
-      setIsUploading(true);
-      try {
-        const isVideo = selectedMedia.type.startsWith('video');
-        const res = await uploadToBunny(selectedMedia, 'status');
-        onPostStatus({
-          type: isVideo ? 'video' : 'image',
-          mediaUrl: res.url,
-          text: statusText.trim() || undefined,
-          bg: '#000000',
-        });
-        onClose();
-      } catch (err) {
-        console.error(err);
-        alert('Failed to upload status media to Bunny.net');
-      } finally {
-        setIsUploading(false);
+  const submit = async () => {
+    setError('');
+    try {
+      if (mode === 'media' && file) {
+        setProgress(0);
+        const isVideo = file.type.startsWith('video/');
+        const body = isVideo ? file : await compressImage(file, 1440);
+        const res = await uploadMedia(body, 'status', { onProgress: setProgress });
+        await postStatus(me, { type: isVideo ? 'video' : 'image', mediaUrl: res.url, mediaPath: res.path, text, bg: '#000000' });
+      } else {
+        if (!text.trim()) return;
+        await postStatus(me, { type: 'text', text, bg });
       }
-      return;
+      toast('Status posted · visible for 24 hours');
+      onClose();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setProgress(null);
     }
-
-    onPostStatus({
-      type: 'text',
-      text: statusText.trim(),
-      bg: selectedBg,
-    });
-    onClose();
   };
+
+  const busy = progress !== null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#0B1330]/90 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-sm rounded-3xl overflow-hidden shadow-2xl bg-[#F4F6FC] dark:bg-[#131B3E] border border-white/10 flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[#E4E8F7] dark:border-[#242D57]">
-          <h3 className="font-bold text-sm text-[#0E1430] dark:text-[#EEF1FF]">New Status Update</h3>
+    <Sheet title="New status update" onClose={onClose}>
+      <div className="p-4 space-y-4">
+        {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+        <input type="file" ref={fileRef} accept="image/*,video/*" className="hidden" onChange={(e) => pick(e.target.files?.[0])} />
+
+        {mode === 'text' ? (
+          <div className="w-full h-56 rounded-2xl p-4 flex items-center justify-center relative shadow-inner transition-colors" style={{ backgroundColor: bg }}>
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="What's on your mind?"
+              aria-label="Status text"
+              className="w-full h-full bg-transparent text-white font-serif-brand text-xl text-center resize-none focus:outline-none placeholder-white/60"
+              maxLength={700}
+              autoFocus
+            />
+            <span className="absolute bottom-2 right-3 text-[10px] text-white/70 font-mono">{text.length}/700</span>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="w-full h-56 rounded-2xl overflow-hidden bg-black flex items-center justify-center">
+              {preview && file?.type.startsWith('video/') ? (
+                <video src={preview} controls className="max-h-full max-w-full" />
+              ) : (
+                preview && <img src={preview} alt="Preview" className="max-h-full max-w-full object-contain" />
+              )}
+            </div>
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Add a caption…"
+              maxLength={700}
+              className="w-full bg-paper dark:bg-night border border-line dark:border-night-line rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-brand"
+            />
+          </div>
+        )}
+
+        {mode === 'text' && (
+          <div>
+            <div className="flex items-center gap-1.5 text-xs text-ink-soft dark:text-mist-soft mb-2 font-semibold">
+              <Palette className="w-3.5 h-3.5 text-brand" /> Background
+            </div>
+            <div className="flex gap-2 justify-center flex-wrap">
+              {BRANDING.statusBackgrounds.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setBg(c)}
+                  aria-label={`Background ${c}`}
+                  className={`w-8 h-8 rounded-full border-2 transition-all cursor-pointer ${bg === c ? 'border-brand scale-110 shadow-md' : 'border-transparent'}`}
+                  style={{ backgroundColor: c }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between pt-2 border-t border-line dark:border-night-line">
+          {mode === 'text' ? (
+            <button onClick={() => fileRef.current?.click()} className="flex items-center gap-1.5 text-xs font-bold text-brand cursor-pointer">
+              <ImageIcon className="w-4 h-4" /> Photo / video
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                setMode('text');
+                setFile(null);
+              }}
+              className="flex items-center gap-1.5 text-xs font-bold text-brand cursor-pointer"
+            >
+              <Type className="w-4 h-4" /> Text instead
+            </button>
+          )}
           <button
-            onClick={onClose}
-            className="w-7 h-7 rounded-full flex items-center justify-center text-[#9AA1C4] hover:text-[#0E1430] dark:hover:text-white cursor-pointer"
+            onClick={submit}
+            disabled={busy || (mode === 'text' ? !text.trim() : !file)}
+            className="bg-brand hover:bg-brand-strong disabled:opacity-50 text-white px-5 py-2 rounded-full font-bold text-xs flex items-center gap-1.5 shadow-md cursor-pointer"
           >
-            <X className="w-4 h-4" />
+            {busy ? <Spinner className="w-3.5 h-3.5 text-white" /> : <Send className="w-3.5 h-3.5" />}
+            {busy ? `Uploading ${progress}%` : 'Post status'}
           </button>
         </div>
-
-        {/* Content Area */}
-        <div className="p-4 space-y-4">
-          {mode === 'text' ? (
-            <div
-              className="w-full h-52 rounded-2xl p-4 flex items-center justify-center transition-colors relative shadow-inner"
-              style={{ backgroundColor: selectedBg }}
-            >
-              <textarea
-                value={statusText}
-                onChange={(e) => setStatusText(e.target.value)}
-                placeholder="What's on your mind?..."
-                className="w-full h-full bg-transparent text-white font-serif-brand text-xl text-center resize-none focus:outline-none placeholder-white/60 drop-shadow-xs"
-                maxLength={180}
-              />
-              <span className="absolute bottom-2 right-3 text-[10px] text-white/70 font-mono">
-                {statusText.length}/180
-              </span>
-            </div>
-          ) : (
-            <div className="w-full h-52 rounded-2xl overflow-hidden bg-black relative flex items-center justify-center">
-              {mediaPreview && selectedMedia?.type.startsWith('video') ? (
-                <video src={mediaPreview} controls className="max-h-full max-w-full" />
-              ) : (
-                <img src={mediaPreview || ''} alt="Preview" className="max-h-full max-w-full object-cover" />
-              )}
-              <button
-                onClick={() => {
-                  setSelectedMedia(null);
-                  setMediaPreview(null);
-                  setMode('text');
-                }}
-                className="absolute top-2 right-2 bg-black/60 text-white rounded-full p-1 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-
-          {/* Color selector for text mode */}
-          {mode === 'text' && (
-            <div>
-              <div className="flex items-center gap-1.5 text-xs text-[#5A6182] dark:text-[#AEB4DA] mb-2 font-semibold">
-                <Palette className="w-3.5 h-3.5 text-[#3B6BFA]" /> Pick Background
-              </div>
-              <div className="flex gap-2 justify-center">
-                {COLOR_PALETTES.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => setSelectedBg(c)}
-                    className={`w-7 h-7 rounded-full border-2 transition-all cursor-pointer ${
-                      selectedBg === c ? 'border-white scale-115 shadow-md' : 'border-transparent'
-                    }`}
-                    style={{ backgroundColor: c }}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Mode switch & Upload trigger */}
-          <div className="flex items-center justify-between pt-2 border-t border-[#E4E8F7] dark:border-[#242D57]">
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileChange}
-              accept="image/*,video/*"
-              className="hidden"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-1.5 text-xs font-bold text-[#3B6BFA] hover:text-[#2453D6] cursor-pointer"
-            >
-              <ImageIcon className="w-4 h-4" />
-              <span>Add Photo/Video</span>
-            </button>
-
-            <button
-              onClick={handleSubmit}
-              disabled={isUploading || (mode === 'text' && !statusText.trim())}
-              className="bg-[#3B6BFA] hover:bg-[#2453D6] disabled:opacity-50 text-white px-5 py-2 rounded-full font-bold text-xs flex items-center gap-1.5 shadow-md transition-all cursor-pointer"
-            >
-              {isUploading ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Uploading to Bunny...</span>
-                </>
-              ) : (
-                <>
-                  <Send className="w-3.5 h-3.5" />
-                  <span>Post Status</span>
-                </>
-              )}
-            </button>
-          </div>
-        </div>
       </div>
-    </div>
+    </Sheet>
   );
 };

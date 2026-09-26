@@ -1,52 +1,90 @@
 @import "tailwindcss";
 
-:root {
-  --navy-950: #0B1330;
-  --navy-900: #101C42;
-  --navy-800: #152657;
-  --blue-600: #2453D6;
-  --blue-500: #3B6BFA;
-  --blue-400: #6E8CFF;
-  --cyan-400: #4DD8E8;
-  --amber-500: #E8A23B;
-  --green-500: #2FBE8F;
-  --paper: #F4F6FC;
-  --paper-card: #FFFFFF;
-  --ink-900: #0E1430;
-  --ink-600: #5A6182;
-  --ink-400: #9AA1C4;
-  --line: #E4E8F7;
-  --radius-lg: 22px;
-  --radius-md: 16px;
-  --radius-sm: 10px;
+/* In-app dark mode toggle (the `.dark` class on <html>), not just the OS preference. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Design tokens. Values here are defaults; src/config/branding.ts and the accent
+ * picker in Settings override them at runtime via CSS variables.
+ */
+@theme {
+  --font-sans: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-serif: 'Fraunces', Georgia, serif;
+  --font-mono: 'Space Mono', ui-monospace, monospace;
+
+  --color-brand: #3b6bfa;
+  --color-brand-strong: #2453d6;
+  --color-brand-soft: #6e8cff;
+  --color-accent: #4dd8e8;
+
+  --color-navy-950: #0b1330;
+  --color-navy-900: #101c42;
+  --color-navy-800: #152657;
+
+  --color-paper: #f4f6fc;
+  --color-line: #e4e8f7;
+  --color-ink: #0e1430;
+  --color-ink-soft: #5a6182;
+  --color-ink-faint: #9aa1c4;
+
+  --color-night: #0b1130;
+  --color-night-card: #131b3e;
+  --color-night-line: #242d57;
+  --color-night-raised: #1e274d;
+  --color-mist: #eef1ff;
+  --color-mist-soft: #aeb4da;
+  --color-mist-faint: #7a81a8;
+  --color-haze: #b9c0e6;
+
+  --color-success: #2fbe8f;
+  --color-gold: #e8a23b;
+
+  --animate-slide-up: slide-up 0.18s ease-out;
+  --animate-fade-in: fade-in 0.15s ease-out;
+  --animate-pop-in: pop-in 0.16s ease-out;
+
+  @keyframes slide-up {
+    from { transform: translateY(12px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes pop-in {
+    from { transform: scale(0.96); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
 }
 
-[data-theme="dark"] {
-  --paper: #0B1130;
-  --paper-card: #131B3E;
-  --ink-900: #EEF1FF;
-  --ink-600: #AEB4DA;
-  --ink-400: #7A81A8;
-  --line: #242D57;
+html,
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+}
+
+html.dark,
+html.dark body {
+  background-color: var(--color-night);
+  color: var(--color-mist);
+  color-scheme: dark;
 }
 
 body {
-  background-color: var(--paper);
-  color: var(--ink-900);
-  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   margin: 0;
   -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
 }
 
 .font-serif-brand {
-  font-family: 'Fraunces', serif;
+  font-family: var(--font-serif);
 }
 
 .font-mono-code {
-  font-family: 'Space Mono', monospace;
+  font-family: var(--font-mono);
 }
 
-/* Custom scrollbar hiding */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -55,14 +93,32 @@ body {
   scrollbar-width: none;
 }
 
-/* Custom pulse and glowing rings */
+.pb-safe {
+  padding-bottom: max(0.375rem, env(safe-area-inset-bottom));
+}
+
 @keyframes ring-pulse {
-  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(77, 216, 232, 0.4); }
-  70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(77, 216, 232, 0); }
-  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(77, 216, 232, 0); }
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-accent) 40%, transparent); }
+  70% { transform: scale(1); box-shadow: 0 0 0 14px transparent; }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 transparent; }
 }
 
 .ring-pulse-active {
   animation: ring-pulse 2s infinite;
 }
 
+@keyframes typing-dot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+.typing-dot {
+  animation: typing-dot 1.2s infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+/* reCAPTCHA badge for phone sign-in should not cover the bottom navigation */
+.grecaptcha-badge {
+  visibility: hidden;
+}

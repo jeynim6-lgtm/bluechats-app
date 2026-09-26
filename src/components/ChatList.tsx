@@ -1,183 +1,214 @@
-import React, { useState } from 'react';
-import { Search, Mic, Camera, Video, CheckCheck, UserPlus, Check } from 'lucide-react';
-import { ChatSummary } from '../types';
-import { FIND_FRIENDS_SUGGESTIONS } from '../services/mockInitialData';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Search, CheckCheck, Check, MessageSquarePlus, UserPlus, Users } from 'lucide-react';
+import { useMe } from '../context/AuthContext';
+import { useAppData, useUserProfile, useNow } from '../context/AppDataContext';
+import { listRecentUsers } from '../services/users';
+import { formatListTime, isOnline } from '../lib/format';
+import { useT } from '../lib/i18n';
+import { Avatar, Spinner, toast } from './ui';
+import type { Chat, UserProfile } from '../types';
+import type { ProfileTarget } from './ContactProfileModal';
 
 interface ChatListProps {
-  chats: ChatSummary[];
-  onSelectChat: (chatId: string) => void;
-  onStartChatWithFriend: (name: string, color: string) => void;
+  onNewChat: () => void;
+  onOpenProfile: (target: ProfileTarget) => void;
 }
 
-export const ChatList: React.FC<ChatListProps> = ({
-  chats,
-  onSelectChat,
-  onStartChatWithFriend,
-}) => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [requestedFriends, setRequestedFriends] = useState<Record<number, boolean>>({});
+const TYPING_WINDOW_MS = 8000;
 
-  const filteredChats = chats.filter((c) =>
-    c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (c.lastMessage && c.lastMessage.toLowerCase().includes(searchTerm.toLowerCase()))
+export function useChatTitle(chat: Chat, meUid: string) {
+  const { displayName } = useAppData();
+  const partnerUid = chat.type === 'direct' ? chat.participants.find((p) => p !== meUid) || null : null;
+  const partner = useUserProfile(partnerUid);
+  const cached = partnerUid ? chat.members[partnerUid] : undefined;
+  return {
+    partnerUid,
+    partner,
+    title: chat.type === 'group' ? chat.name || 'Group' : displayName(partnerUid || '', partner?.name || cached?.name || 'Blue Chats user'),
+    avatarColor: chat.type === 'group' ? chat.avatarColor || '#8A6CF2' : partner?.avatarColor || cached?.avatarColor || '#3B6BFA',
+    avatarUrl: chat.type === 'group' ? null : partner?.avatarUrl || cached?.avatarUrl || null,
+  };
+}
+
+const ChatRow: React.FC<{ chat: Chat; onOpen: () => void }> = ({ chat, onOpen }) => {
+  const me = useMe();
+  const t = useT();
+  const now = useNow(10_000);
+  const { title, partner, avatarColor, avatarUrl } = useChatTitle(chat, me.uid);
+  const unread = chat.unread[me.uid] || 0;
+  const last = chat.lastMessage;
+  const typingUids = Object.entries(chat.typing).filter(([uid, at]) => uid !== me.uid && now - at < TYPING_WINDOW_MS).map(([uid]) => uid);
+  const mine = last?.senderId === me.uid;
+  const readByOthers = mine && last && chat.participants.filter((p) => p !== me.uid).every((p) => (chat.readAt[p] || 0) >= last.at);
+
+  return (
+    <button
+      onClick={onOpen}
+      className="w-full text-left flex items-center gap-3.5 px-4 py-3 hover:bg-black/[0.02] dark:hover:bg-white/5 active:bg-black/5 cursor-pointer transition-colors"
+    >
+      <Avatar name={title} color={avatarColor} url={avatarUrl} size={52} online={chat.type === 'direct' && isOnline(partner?.lastSeen)} />
+      <div className="flex-1 min-w-0">
+        <div className="flex justify-between items-baseline mb-0.5 gap-2">
+          <h3 className="font-bold text-sm text-ink dark:text-mist truncate flex items-center gap-1">
+            {chat.type === 'group' && <Users className="w-3.5 h-3.5 text-ink-faint flex-shrink-0" />}
+            {title}
+          </h3>
+          <span className={`text-[11px] flex-shrink-0 ${unread ? 'text-brand font-bold' : 'text-ink-faint dark:text-mist-faint'}`}>
+            {last ? formatListTime(last.at) : ''}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs text-ink-soft dark:text-mist-soft truncate min-w-0">
+            {typingUids.length > 0 ? (
+              <span className="text-success font-semibold truncate">
+                {chat.type === 'group' ? `${chat.members[typingUids[0]]?.name?.split(' ')[0] || 'Someone'} is ${t('typing')}` : t('typing')}
+              </span>
+            ) : (
+              <>
+                {mine &&
+                  (readByOthers ? (
+                    <CheckCheck className="w-3.5 h-3.5 text-accent flex-shrink-0" />
+                  ) : (
+                    <Check className="w-3.5 h-3.5 text-ink-faint flex-shrink-0" />
+                  ))}
+                <span className="truncate">
+                  {last
+                    ? chat.type === 'group' && !mine && last.type !== 'system'
+                      ? `${last.senderName.split(' ')[0]}: ${last.text}`
+                      : last.text
+                    : 'Tap to start chatting'}
+                </span>
+              </>
+            )}
+          </div>
+          {unread > 0 && (
+            <span className="flex-shrink-0 bg-brand text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-5 text-center">
+              {unread > 99 ? '99+' : unread}
+            </span>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+};
+
+export const ChatList: React.FC<ChatListProps> = ({ onNewChat, onOpenProfile }) => {
+  const me = useMe();
+  const t = useT();
+  const { chats, chatsLoading, openChat, openDirectChat, blocked, displayName } = useAppData();
+  const [search, setSearch] = useState('');
+  const [suggestions, setSuggestions] = useState<UserProfile[]>([]);
+  const [openingUid, setOpeningUid] = useState<string | null>(null);
+
+  const partnerIds = useMemo(
+    () => new Set(chats.filter((c) => c.type === 'direct').flatMap((c) => c.participants)),
+    [chats]
   );
 
-  const getInitials = (name: string) => {
-    return name
-      .split(' ')
-      .map((w) => w[0])
-      .slice(0, 2)
-      .join('')
-      .toUpperCase();
-  };
+  useEffect(() => {
+    listRecentUsers(25)
+      .then((users) => setSuggestions(users))
+      .catch((err) => console.warn('[chats] suggestions unavailable', err));
+  }, []);
 
-  const handleRequestFriend = (index: number, name: string, color: string) => {
-    setRequestedFriends((prev) => ({ ...prev, [index]: true }));
-    onStartChatWithFriend(name, color);
+  const visibleSuggestions = suggestions
+    .filter((u) => u.uid !== me.uid && !partnerIds.has(u.uid) && !blocked.has(u.uid))
+    .slice(0, 6);
+
+  const term = search.trim().toLowerCase();
+  const filtered = term
+    ? chats.filter((c) => {
+        const partner = c.participants.find((p) => p !== me.uid) || '';
+        const name = c.type === 'group' ? c.name || '' : displayName(partner, c.members[partner]?.name || '');
+        return name.toLowerCase().includes(term) || (c.lastMessage?.text || '').toLowerCase().includes(term);
+      })
+    : chats;
+
+  const startChat = async (uid: string) => {
+    setOpeningUid(uid);
+    try {
+      await openDirectChat(uid);
+    } catch (err) {
+      toast((err as Error).message);
+    } finally {
+      setOpeningUid(null);
+    }
   };
 
   return (
-    <div className="pb-24">
-      {/* Search Bar */}
+    <div className="pb-4">
       <div className="px-4 py-2.5">
-        <div className="flex items-center gap-2 bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-full px-4 py-2.5 text-sm shadow-xs">
-          <Search className="w-4 h-4 text-[#9AA1C4]" />
+        <label className="flex items-center gap-2 bg-white dark:bg-night-card border border-line dark:border-night-line rounded-full px-4 py-2.5 shadow-xs">
+          <Search className="w-4 h-4 text-ink-faint" />
           <input
-            type="text"
-            placeholder="Search chats or messages..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-transparent text-[#0E1430] dark:text-[#EEF1FF] placeholder-[#9AA1C4] focus:outline-none text-sm"
+            type="search"
+            placeholder={t('searchChats')}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full bg-transparent text-ink dark:text-mist placeholder-ink-faint focus:outline-none text-sm"
           />
-        </div>
+        </label>
       </div>
 
-      {/* Chats List */}
-      <div className="divide-y divide-[#E4E8F7]/60 dark:divide-[#242D57]/60">
-        {filteredChats.map((chat) => (
-          <div
-            key={chat.id}
-            onClick={() => onSelectChat(chat.id)}
-            className="flex items-center gap-3.5 px-4 py-3 hover:bg-black/2 dark:hover:bg-white/5 active:bg-black/5 cursor-pointer transition-colors"
-          >
-            {/* Avatar */}
-            <div className="relative flex-shrink-0">
-              <div
-                className="w-13 h-13 rounded-2xl flex items-center justify-center font-bold text-white text-base shadow-xs"
-                style={{ backgroundColor: chat.avatarColor }}
-              >
-                {getInitials(chat.name)}
-              </div>
-              {chat.online && (
-                <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-[#2FBE8F] border-2 border-white dark:border-[#131B3E]"></span>
-              )}
-            </div>
-
-            {/* Chat Meta */}
-            <div className="flex-1 min-w-0">
-              <div className="flex justify-between items-baseline mb-0.5">
-                <h3 className="font-bold text-sm text-[#0E1430] dark:text-[#EEF1FF] truncate">
-                  {chat.name}
-                </h3>
-                <span className="text-[11px] text-[#9AA1C4] dark:text-[#7A81A8] flex-shrink-0 ml-2">
-                  {chat.lastMessageTime}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-xs text-[#5A6182] dark:text-[#AEB4DA] truncate">
-                  {chat.mine && (
-                    <CheckCheck className="w-3.5 h-3.5 text-[#4DD8E8] flex-shrink-0" />
-                  )}
-                  {chat.lastMessageType === 'voice' && (
-                    <Mic className="w-3.5 h-3.5 text-[#3B6BFA] flex-shrink-0" />
-                  )}
-                  {chat.lastMessageType === 'image' && (
-                    <Camera className="w-3.5 h-3.5 text-[#3B6BFA] flex-shrink-0" />
-                  )}
-                  {chat.lastMessageType === 'video' && (
-                    <Video className="w-3.5 h-3.5 text-[#3B6BFA] flex-shrink-0" />
-                  )}
-                  <span className="truncate">{chat.lastMessage || 'Tap to chat'}</span>
-                </div>
-
-                {chat.unreadCount > 0 && (
-                  <span className="flex-shrink-0 bg-[#3B6BFA] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-5 text-center shadow-xs">
-                    {chat.unreadCount}
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        ))}
-
-        {filteredChats.length === 0 && (
-          <div className="text-center py-12 text-[#9AA1C4]">
-            <p className="text-sm font-medium">No chats found for "{searchTerm}"</p>
-          </div>
-        )}
-      </div>
-
-      {/* Find Friends Section */}
-      <div className="mt-4 pt-3 border-t-8 border-[#F4F6FC] dark:border-[#0B1130]">
-        <div className="px-4 py-2">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-bold text-[#0E1430] dark:text-[#EEF1FF] tracking-tight">
-              Find friends
-            </h2>
-            <span className="text-[11px] font-semibold text-[#3B6BFA]">People nearby</span>
-          </div>
-          <p className="text-xs text-[#5A6182] dark:text-[#AEB4DA] mt-0.5 mb-3">
-            People near you on Blue Chats who aren't in your contacts yet.
-          </p>
+      {chatsLoading ? (
+        <div className="py-16 flex justify-center">
+          <Spinner className="w-6 h-6" />
         </div>
-
-        <div className="space-y-1">
-          {FIND_FRIENDS_SUGGESTIONS.map((friend, idx) => (
-            <div
-              key={idx}
-              className="flex items-center justify-between px-4 py-2.5 hover:bg-black/2 dark:hover:bg-white/5 transition-colors"
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <div
-                  className="w-11 h-11 rounded-full flex items-center justify-center font-bold text-white text-xs shadow-xs flex-shrink-0"
-                  style={{ backgroundColor: friend.color }}
-                >
-                  {getInitials(friend.name)}
-                </div>
-                <div className="min-w-0">
-                  <h4 className="font-bold text-xs text-[#0E1430] dark:text-[#EEF1FF] truncate">
-                    {friend.name}
-                  </h4>
-                  <p className="text-[11px] text-[#9AA1C4] dark:text-[#7A81A8] truncate">
-                    {friend.sub}
-                  </p>
-                </div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-12 px-6 space-y-3">
+          {term ? (
+            <p className="text-sm text-ink-faint">No chats match “{search}”.</p>
+          ) : (
+            <>
+              <div className="w-16 h-16 rounded-3xl bg-brand/10 text-brand flex items-center justify-center mx-auto">
+                <MessageSquarePlus className="w-8 h-8" />
               </div>
+              <h3 className="font-bold text-sm text-ink dark:text-mist">No chats yet</h3>
+              <p className="text-xs text-ink-soft dark:text-mist-soft">Start a conversation with a contact, or say hi to someone below.</p>
+              <button onClick={onNewChat} className="px-5 py-2.5 rounded-full bg-brand hover:bg-brand-strong text-white font-bold text-xs shadow-md cursor-pointer">
+                {t('newChat')}
+              </button>
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="divide-y divide-line/60 dark:divide-night-line/60">
+          {filtered.map((chat) => (
+            <ChatRow key={chat.id} chat={chat} onOpen={() => openChat(chat.id)} />
+          ))}
+        </div>
+      )}
 
+      {visibleSuggestions.length > 0 && !term && (
+        <div className="mt-4 pt-3 border-t-8 border-paper dark:border-night">
+          <div className="px-4 py-2">
+            <h2 className="text-base font-bold text-ink dark:text-mist tracking-tight">People on Blue Chats</h2>
+            <p className="text-xs text-ink-soft dark:text-mist-soft mt-0.5 mb-2">New members you haven't chatted with yet.</p>
+          </div>
+          {visibleSuggestions.map((u) => (
+            <div key={u.uid} className="flex items-center justify-between px-4 py-2.5">
               <button
-                onClick={() => handleRequestFriend(idx, friend.name, friend.color)}
-                disabled={requestedFriends[idx]}
-                className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
-                  requestedFriends[idx]
-                    ? 'bg-[#E4E8F7] dark:bg-[#242D57] text-[#5A6182] dark:text-[#AEB4DA]'
-                    : 'bg-[#3B6BFA] hover:bg-[#2453D6] text-white shadow-xs'
-                }`}
+                onClick={() => onOpenProfile({ uid: u.uid, name: u.name, avatarColor: u.avatarColor, avatarUrl: u.avatarUrl })}
+                className="flex items-center gap-3 min-w-0 text-left cursor-pointer"
               >
-                {requestedFriends[idx] ? (
-                  <>
-                    <Check className="w-3 h-3" /> Chatting
-                  </>
-                ) : (
-                  <>
-                    <UserPlus className="w-3 h-3" /> Chat
-                  </>
-                )}
+                <Avatar name={u.name} color={u.avatarColor} url={u.avatarUrl} size={44} shape="circle" online={isOnline(u.lastSeen)} />
+                <div className="min-w-0">
+                  <h4 className="font-bold text-xs text-ink dark:text-mist truncate">{u.name}</h4>
+                  <p className="text-[11px] text-ink-faint dark:text-mist-faint truncate">{u.bio || u.country}</p>
+                </div>
+              </button>
+              <button
+                onClick={() => startChat(u.uid)}
+                disabled={openingUid === u.uid}
+                className="px-3 py-1.5 rounded-full text-xs font-bold bg-brand hover:bg-brand-strong text-white shadow-xs cursor-pointer flex items-center gap-1 disabled:opacity-60"
+              >
+                {openingUid === u.uid ? <Spinner className="w-3 h-3 text-white" /> : <UserPlus className="w-3 h-3" />}
+                Say hi
               </button>
             </div>
           ))}
         </div>
-      </div>
+      )}
     </div>
   );
 };

@@ -1,280 +1,212 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  Mic,
-  MicOff,
-  Video,
-  VideoOff,
-  PhoneOff,
-  SwitchCamera,
-  CircleDot,
-  Loader2,
-} from 'lucide-react';
-import { CallRecord } from '../types';
-import { uploadToBunny } from '../services/bunnyStorage';
+import React, { useEffect, useRef, useState } from 'react';
+import { Mic, MicOff, Video, VideoOff, PhoneOff, Phone, SwitchCamera, CircleDot, Loader2, Lock, VolumeX } from 'lucide-react';
+import { useCalls } from '../context/CallContext';
+import { useAppData } from '../context/AppDataContext';
+import { formatDuration } from '../lib/format';
+import { Avatar } from './ui';
 
-interface CallModalProps {
-  partnerId: string;
-  partnerName: string;
-  callType: 'voice' | 'video';
-  onEndCall: (callRecord: Partial<CallRecord>) => void;
-}
-
-export const CallModal: React.FC<CallModalProps> = ({
-  partnerId,
-  partnerName,
-  callType,
-  onEndCall,
-}) => {
-  const [duration, setDuration] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(callType === 'voice');
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
-  const [isRecording, setIsRecording] = useState(false);
-  const [isSavingRecording, setIsSavingRecording] = useState(false);
-  const [recordingUrl, setRecordingUrl] = useState<string | undefined>(undefined);
-
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const callRecorderRef = useRef<MediaRecorder | null>(null);
-  const callChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<number | null>(null);
-
-  // Initialize camera and mic
+const StreamVideo: React.FC<{ stream: MediaStream | null; mirrored?: boolean; className?: string }> = ({ stream, mirrored, className }) => {
+  const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
-    async function startMedia() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: callType === 'video' ? { facingMode } : false,
-        });
+    if (ref.current && ref.current.srcObject !== stream) ref.current.srcObject = stream;
+  }, [stream]);
+  return <video ref={ref} autoPlay playsInline muted className={`${className} ${mirrored ? '-scale-x-100' : ''}`} />;
+};
 
-        localStreamRef.current = stream;
-        if (localVideoRef.current && callType === 'video') {
-          localVideoRef.current.srcObject = stream;
-        }
-      } catch (err) {
-        console.warn('Media devices notice (running in simulation/restricted mode):', err);
-      }
-    }
+/** Remote audio always plays through a dedicated element (video elements stay muted). */
+const RemoteAudio: React.FC<{ stream: MediaStream | null; onBlocked: (blocked: boolean) => void; retryKey: number }> = ({ stream, onBlocked, retryKey }) => {
+  const ref = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !stream) return;
+    if (el.srcObject !== stream) el.srcObject = stream;
+    el.play()
+      .then(() => onBlocked(false))
+      .catch(() => onBlocked(true));
+  }, [stream, retryKey, onBlocked]);
+  return <audio ref={ref} autoPlay playsInline />;
+};
 
-    startMedia();
+export const CallModal: React.FC = () => {
+  const { call, accept, decline, hangup, toggleMute, toggleCamera, switchCamera, toggleRecording, dismiss } = useCalls();
+  const { displayName } = useAppData();
+  const [, tick] = useState(0);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [audioRetry, setAudioRetry] = useState(0);
 
-    // Start duration timer
-    timerRef.current = window.setInterval(() => {
-      setDuration((prev) => prev + 1);
-    }, 1000);
+  useEffect(() => {
+    if (call?.phase !== 'connected') return;
+    const id = window.setInterval(() => tick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [call?.phase]);
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, [callType, facingMode]);
+  if (!call) return null;
 
-  // Toggle Mute
-  const toggleMute = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((t) => {
-        t.enabled = isMuted;
-      });
-    }
-    setIsMuted(!isMuted);
-  };
+  const name = displayName(call.partner.uid, call.partner.name);
+  const isVideo = call.type === 'video';
+  const { phase } = call;
+  const remoteHasVideo = Boolean(call.remoteStream?.getVideoTracks().length) && !call.partnerCameraOff;
+  const localHasVideo = isVideo && !call.cameraOff && !call.videoUnavailable && Boolean(call.localStream?.getVideoTracks().length);
+  const showRemoteVideo = isVideo && (phase === 'connected' || phase === 'reconnecting') && remoteHasVideo;
 
-  // Toggle Video
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach((t) => {
-        t.enabled = isVideoOff;
-      });
-    }
-    setIsVideoOff(!isVideoOff);
-  };
+  const statusText =
+    phase === 'incoming'
+      ? `Incoming ${isVideo ? 'video' : 'voice'} call`
+      : phase === 'outgoing'
+      ? call.callId
+        ? 'Ringing…'
+        : 'Calling…'
+      : phase === 'connecting'
+      ? 'Connecting…'
+      : phase === 'reconnecting'
+      ? 'Reconnecting…'
+      : phase === 'ended'
+      ? call.endReason || 'Call ended'
+      : formatDuration((Date.now() - (call.connectedAt || Date.now())) / 1000);
 
-  // Switch camera
-  const switchCamera = () => {
-    setFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'));
-  };
-
-  // Toggle call recording to Bunny.net
-  const toggleCallRecording = () => {
-    if (!isRecording) {
-      if (!localStreamRef.current) return;
-      callChunksRef.current = [];
-      const recorder = new MediaRecorder(localStreamRef.current);
-      callRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) callChunksRef.current.push(e.data);
-      };
-
-      recorder.start();
-      setIsRecording(true);
-    } else {
-      if (callRecorderRef.current) {
-        callRecorderRef.current.stop();
-        setIsRecording(false);
-      }
-    }
-  };
-
-  // End Call
-  const handleHangup = async () => {
-    let finalRecUrl = recordingUrl;
-
-    if (isRecording && callRecorderRef.current) {
-      setIsSavingRecording(true);
-      callRecorderRef.current.stop();
-
-      await new Promise((r) => setTimeout(r, 500));
-      const blob = new Blob(callChunksRef.current, { type: 'video/webm' });
-      if (blob.size > 0) {
-        try {
-          const res = await uploadToBunny(blob, 'calls');
-          finalRecUrl = res.url;
-        } catch (e) {
-          console.warn('Failed to upload call recording:', e);
-        }
-      }
-    }
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
-    }
-
-    onEndCall({
-      partnerId,
-      partnerName,
-      type: callType,
-      direction: 'outgoing',
-      durationSeconds: duration,
-      recordingUrl: finalRecUrl,
-    });
-  };
-
-  const formatSecs = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
+  const control = (active: boolean) =>
+    `w-12 h-12 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-40 ${
+      active ? 'bg-white text-navy-950 shadow-lg' : 'bg-white/15 text-white hover:bg-white/25'
+    }`;
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#0B1330] text-white flex flex-col justify-between max-w-[480px] mx-auto overflow-hidden select-none">
-      {/* Top Header */}
-      <div className="px-6 pt-10 pb-4 text-center z-20 bg-gradient-to-b from-black/80 to-transparent">
-        <h2 className="font-bold text-xl drop-shadow-md">{partnerName}</h2>
-        <p className="text-xs text-[#4DD8E8] mt-1 font-mono tracking-wider font-semibold">
-          {formatSecs(duration)} · {callType === 'video' ? 'HD Video Call' : 'Voice Call'}
-        </p>
+    <div className="fixed inset-0 z-[65] bg-navy-950 text-white flex flex-col justify-between max-w-[480px] mx-auto overflow-hidden select-none" role="dialog" aria-label={`Call with ${name}`}>
+      <RemoteAudio stream={call.remoteStream} onBlocked={setAudioBlocked} retryKey={audioRetry} />
 
-        {isRecording && (
-          <div className="inline-flex items-center gap-1.5 bg-red-600/80 px-2.5 py-0.5 rounded-full text-[10px] font-bold mt-2 animate-pulse">
-            <span className="w-2 h-2 rounded-full bg-white"></span>
-            <span>Recording Call to Bunny.net</span>
-          </div>
-        )}
-      </div>
-
-      {/* Main Stream Display Area */}
-      <div className="flex-1 relative flex items-center justify-center overflow-hidden">
-        {callType === 'video' && !isVideoOff ? (
-          <>
-            {/* Main view (simulated partner feed) */}
-            <div className="absolute inset-0 bg-gradient-to-tr from-[#101C42] via-[#1B2A5E] to-[#2453D6] flex flex-col items-center justify-center p-6 text-center">
-              <div className="w-28 h-28 rounded-full bg-[#3B6BFA] border-4 border-white/20 flex items-center justify-center font-bold text-3xl shadow-2xl mb-4 ring-pulse-active">
-                {partnerName.substring(0, 2).toUpperCase()}
-              </div>
-              <p className="text-sm font-semibold text-white/90">Connected with {partnerName}</p>
-              <span className="text-xs text-[#4DD8E8] mt-1">WebRTC Live Stream</span>
-            </div>
-
-            {/* PiP view for local user camera */}
-            <div className="absolute top-4 right-4 w-28 h-40 rounded-2xl overflow-hidden border-2 border-white/30 shadow-2xl bg-black z-20">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-            </div>
-          </>
+      {/* Background: remote video, or my own preview while ringing */}
+      <div className="absolute inset-0">
+        {showRemoteVideo ? (
+          <StreamVideo stream={call.remoteStream} className="w-full h-full object-cover" />
+        ) : isVideo && localHasVideo && (phase === 'outgoing' || phase === 'connecting') ? (
+          <StreamVideo stream={call.localStream} mirrored={call.facingMode === 'user'} className="w-full h-full object-cover opacity-60" />
         ) : (
-          /* Voice Call Avatar display */
-          <div className="flex flex-col items-center justify-center p-6 text-center z-10">
-            <div className="w-32 h-32 rounded-full bg-[#3B6BFA] border-4 border-[#4DD8E8]/40 flex items-center justify-center font-bold text-4xl shadow-2xl mb-6 ring-pulse-active">
-              {partnerName.substring(0, 2).toUpperCase()}
-            </div>
-            <h3 className="font-bold text-lg">{partnerName}</h3>
-            <span className="text-xs text-[#AEB6E8] mt-1">Encrypted Blue Chats Call</span>
-          </div>
+          <div className="w-full h-full bg-gradient-to-tr from-navy-950 via-navy-900 to-brand-strong" />
         )}
       </div>
 
-      {/* Bottom Controls Bar */}
-      <div className="p-6 pb-10 bg-gradient-to-t from-black/90 via-black/60 to-transparent z-20">
-        <div className="flex items-center justify-around max-w-xs mx-auto">
-          {/* Mute */}
-          <button
-            onClick={toggleMute}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all cursor-pointer ${
-              isMuted
-                ? 'bg-red-500 text-white shadow-lg'
-                : 'bg-white/15 text-white hover:bg-white/25'
-            }`}
-          >
-            {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-          </button>
+      {/* Header */}
+      <div className="relative px-6 pt-10 pb-6 text-center z-10 bg-gradient-to-b from-black/70 to-transparent">
+        {!showRemoteVideo && (
+          <Avatar
+            name={name}
+            color={call.partner.avatarColor}
+            url={call.partner.avatarUrl}
+            size={112}
+            shape="circle"
+            className={`mx-auto mb-4 ${phase === 'incoming' || phase === 'outgoing' ? 'ring-pulse-active rounded-full' : ''}`}
+          />
+        )}
+        <h2 className="font-bold text-xl drop-shadow-md">{name}</h2>
+        <p className={`text-sm mt-1 font-semibold ${phase === 'ended' ? 'text-red-300' : 'text-accent'} ${phase === 'connected' ? 'font-mono' : ''}`}>{statusText}</p>
+        {(phase === 'connected' || phase === 'reconnecting') && (
+          <p className="text-[10px] text-white/60 mt-1 flex items-center justify-center gap-1">
+            <Lock className="w-3 h-3" /> Encrypted peer-to-peer{call.relayed ? ' · via relay' : ''}
+          </p>
+        )}
+        {call.partnerRecording && (
+          <div className="inline-flex items-center gap-1.5 bg-red-600/80 px-2.5 py-0.5 rounded-full text-[10px] font-bold mt-2">
+            <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> {name.split(' ')[0]} is recording this call
+          </div>
+        )}
+        {call.recording && (
+          <div className="inline-flex items-center gap-1.5 bg-red-600/80 px-2.5 py-0.5 rounded-full text-[10px] font-bold mt-2 ml-1">
+            <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> Recording
+          </div>
+        )}
+        {call.savingRecording && (
+          <div className="inline-flex items-center gap-1.5 bg-white/15 px-2.5 py-0.5 rounded-full text-[10px] font-bold mt-2">
+            <Loader2 className="w-3 h-3 animate-spin" /> Saving recording…
+          </div>
+        )}
+        {call.partnerMuted && phase === 'connected' && (
+          <p className="text-[11px] text-white/70 mt-2 flex items-center justify-center gap-1">
+            <MicOff className="w-3 h-3" /> {name.split(' ')[0]} is muted
+          </p>
+        )}
+        {isVideo && call.partnerCameraOff && phase === 'connected' && (
+          <p className="text-[11px] text-white/70 mt-1">{name.split(' ')[0]} turned their camera off</p>
+        )}
+        {call.videoUnavailable && isVideo && phase !== 'ended' && (
+          <p className="text-[11px] text-amber-300 mt-1">Your camera is unavailable — continuing with audio only</p>
+        )}
+      </div>
 
-          {/* Toggle Video */}
-          <button
-            onClick={toggleVideo}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all cursor-pointer ${
-              isVideoOff
-                ? 'bg-red-500 text-white shadow-lg'
-                : 'bg-white/15 text-white hover:bg-white/25'
-            }`}
-          >
-            {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
-          </button>
-
-          {/* Switch Camera */}
-          {callType === 'video' && (
-            <button
-              onClick={switchCamera}
-              className="w-12 h-12 rounded-full flex items-center justify-center bg-white/15 text-white hover:bg-white/25 transition-all cursor-pointer"
-            >
-              <SwitchCamera className="w-5 h-5" />
-            </button>
-          )}
-
-          {/* Call Recording */}
-          <button
-            onClick={toggleCallRecording}
-            title={isRecording ? 'Stop Recording' : 'Record Call to Bunny.net'}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all cursor-pointer ${
-              isRecording
-                ? 'bg-amber-500 text-white animate-pulse'
-                : 'bg-white/15 text-white hover:bg-white/25'
-            }`}
-          >
-            <CircleDot className="w-5 h-5" />
-          </button>
-
-          {/* Hang up */}
-          <button
-            onClick={handleHangup}
-            disabled={isSavingRecording}
-            className="w-14 h-14 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 active:scale-95 text-white shadow-xl transition-all cursor-pointer"
-          >
-            {isSavingRecording ? (
-              <Loader2 className="w-6 h-6 animate-spin" />
-            ) : (
-              <PhoneOff className="w-6 h-6" />
-            )}
-          </button>
+      {/* Local picture-in-picture during the call */}
+      {isVideo && localHasVideo && (phase === 'connected' || phase === 'reconnecting') && (
+        <div className="absolute top-4 right-4 w-28 h-40 rounded-2xl overflow-hidden border-2 border-white/30 shadow-2xl bg-black z-20">
+          <StreamVideo stream={call.localStream} mirrored={call.facingMode === 'user'} className="w-full h-full object-cover" />
         </div>
+      )}
+
+      {audioBlocked && phase !== 'ended' && call.remoteStream && (
+        <button
+          onClick={() => setAudioRetry((n) => n + 1)}
+          className="relative z-20 mx-auto px-4 py-2 rounded-full bg-white text-navy-950 text-xs font-bold flex items-center gap-2 shadow-lg cursor-pointer"
+        >
+          <VolumeX className="w-4 h-4" /> Tap to enable sound
+        </button>
+      )}
+
+      {/* Controls */}
+      <div className="relative p-6 pb-10 bg-gradient-to-t from-black/90 via-black/60 to-transparent z-20">
+        {phase === 'incoming' ? (
+          <div className="flex items-center justify-around max-w-xs mx-auto">
+            <div className="flex flex-col items-center gap-2">
+              <button onClick={decline} aria-label="Decline call" className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center shadow-xl cursor-pointer active:scale-95">
+                <PhoneOff className="w-7 h-7" />
+              </button>
+              <span className="text-xs">Decline</span>
+            </div>
+            <div className="flex flex-col items-center gap-2">
+              <button onClick={accept} aria-label="Accept call" className="w-16 h-16 rounded-full bg-emerald-500 hover:bg-emerald-600 flex items-center justify-center shadow-xl cursor-pointer active:scale-95 animate-pulse">
+                {isVideo ? <Video className="w-7 h-7" /> : <Phone className="w-7 h-7" />}
+              </button>
+              <span className="text-xs">Accept</span>
+            </div>
+          </div>
+        ) : phase === 'ended' ? (
+          <div className="flex justify-center">
+            <button onClick={dismiss} disabled={call.savingRecording} className="px-8 py-3 rounded-full bg-white/15 hover:bg-white/25 text-sm font-bold cursor-pointer disabled:opacity-50">
+              Close
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-around max-w-sm mx-auto">
+            <button onClick={toggleMute} aria-label={call.muted ? 'Unmute' : 'Mute'} aria-pressed={call.muted} className={control(call.muted)}>
+              {call.muted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            </button>
+            {isVideo && (
+              <button
+                onClick={toggleCamera}
+                disabled={call.videoUnavailable}
+                aria-label={call.cameraOff ? 'Turn camera on' : 'Turn camera off'}
+                aria-pressed={call.cameraOff}
+                className={control(call.cameraOff)}
+              >
+                {call.cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+              </button>
+            )}
+            {isVideo && (
+              <button onClick={switchCamera} disabled={call.videoUnavailable || call.cameraOff} aria-label="Switch camera" className={control(false)}>
+                <SwitchCamera className="w-5 h-5" />
+              </button>
+            )}
+            <button
+              onClick={toggleRecording}
+              disabled={phase !== 'connected' || call.savingRecording}
+              aria-label={call.recording ? 'Stop recording' : 'Record call'}
+              title={call.recording ? 'Stop recording' : 'Record call (the other person is notified)'}
+              className={`w-12 h-12 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-40 ${
+                call.recording ? 'bg-red-500 text-white animate-pulse' : 'bg-white/15 text-white hover:bg-white/25'
+              }`}
+            >
+              <CircleDot className="w-5 h-5" />
+            </button>
+            <button onClick={hangup} aria-label="Hang up" className="w-14 h-14 rounded-full flex items-center justify-center bg-red-600 hover:bg-red-700 active:scale-95 shadow-xl transition-all cursor-pointer">
+              <PhoneOff className="w-6 h-6" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

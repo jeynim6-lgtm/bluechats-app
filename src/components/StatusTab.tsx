@@ -1,129 +1,169 @@
-import React from 'react';
-import { Plus } from 'lucide-react';
-import { StatusContact } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Plus, Camera } from 'lucide-react';
+import { useMe } from '../context/AuthContext';
+import { useAppData } from '../context/AppDataContext';
+import { subscribeStatuses } from '../services/status';
+import { formatRelative } from '../lib/format';
+import { useT } from '../lib/i18n';
+import { Avatar } from './ui';
+import { StatusViewer } from './StatusViewer';
+import { StatusComposer } from './StatusComposer';
+import type { StatusGroup, StatusItem } from '../types';
 
-interface StatusTabProps {
-  contacts: StatusContact[];
-  onOpenStory: (contactIndex: number) => void;
-  onOpenComposer: () => void;
+export interface StatusFeed {
+  mine: StatusGroup | null;
+  others: StatusGroup[];
+  hasUnseen: boolean;
 }
 
-export const StatusTab: React.FC<StatusTabProps> = ({
-  contacts,
-  onOpenStory,
-  onOpenComposer,
-}) => {
-  const getInitials = (name: string) => {
-    return name
-      .split(' ')
-      .map((w) => w[0])
-      .slice(0, 2)
-      .join('')
-      .toUpperCase();
+/** Live statuses from me, my contacts and people I chat with. */
+export function useStatusFeed(): StatusFeed {
+  const me = useMe();
+  const { contacts, chats, blocked, displayName } = useAppData();
+  const [items, setItems] = useState<StatusItem[]>([]);
+
+  const authorKey = useMemo(() => {
+    const ids = new Set<string>([me.uid]);
+    contacts.forEach((c) => c.uid && ids.add(c.uid));
+    chats.forEach((c) => c.type === 'direct' && c.participants.forEach((p) => ids.add(p)));
+    return [...ids].sort().join(',');
+  }, [me.uid, contacts, chats]);
+
+  useEffect(() => subscribeStatuses(authorKey.split(','), setItems), [authorKey]);
+
+  return useMemo(() => {
+    const byAuthor = new Map<string, StatusItem[]>();
+    for (const item of items) {
+      if (blocked.has(item.authorId)) continue;
+      const list = byAuthor.get(item.authorId) || [];
+      list.push(item);
+      byAuthor.set(item.authorId, list);
+    }
+    const groups: StatusGroup[] = [...byAuthor.entries()].map(([authorId, list]) => {
+      list.sort((a, b) => a.createdAt - b.createdAt);
+      const latest = list[list.length - 1];
+      const isMine = authorId === me.uid;
+      return {
+        authorId,
+        name: isMine ? 'My status' : displayName(authorId, latest.author?.name || 'Blue Chats user'),
+        avatarColor: latest.author?.avatarColor || '#3B6BFA',
+        avatarUrl: latest.author?.avatarUrl || null,
+        items: list,
+        seen: isMine || list.every((s) => s.viewers.includes(me.uid)),
+        isMine,
+      };
+    });
+    const mine = groups.find((g) => g.isMine) || null;
+    const others = groups
+      .filter((g) => !g.isMine)
+      .sort((a, b) => Number(a.seen) - Number(b.seen) || b.items[b.items.length - 1].createdAt - a.items[a.items.length - 1].createdAt);
+    return { mine, others, hasUnseen: others.some((g) => !g.seen) };
+  }, [items, blocked, me.uid, displayName]);
+}
+
+const StoryRing: React.FC<{ group: StatusGroup; size?: number }> = ({ group, size = 52 }) => (
+  <div
+    className={`rounded-full p-[2.5px] ${group.seen ? 'bg-line dark:bg-night-line' : 'bg-gradient-to-tr from-accent via-brand to-brand-soft'}`}
+    style={{ width: size + 5, height: size + 5 }}
+  >
+    <div className="rounded-full border-2 border-white dark:border-night overflow-hidden">
+      <Avatar name={group.name} color={group.avatarColor} url={group.avatarUrl} size={size - 4} shape="circle" />
+    </div>
+  </div>
+);
+
+export const StatusTab: React.FC<{ feed: StatusFeed }> = ({ feed }) => {
+  const me = useMe();
+  const t = useT();
+  const [viewer, setViewer] = useState<{ groups: StatusGroup[]; index: number } | null>(null);
+  const [composer, setComposer] = useState<null | 'text' | 'media'>(null);
+
+  const unseen = feed.others.filter((g) => !g.seen);
+  const seen = feed.others.filter((g) => g.seen);
+  const latestMine = feed.mine?.items[feed.mine.items.length - 1];
+
+  const row = (group: StatusGroup, list: StatusGroup[]) => {
+    const latest = group.items[group.items.length - 1];
+    return (
+      <button
+        key={group.authorId}
+        onClick={() => setViewer({ groups: list, index: list.indexOf(group) })}
+        className="w-full flex items-center gap-3.5 px-4 py-2.5 hover:bg-black/[0.02] dark:hover:bg-white/5 text-left cursor-pointer"
+      >
+        <StoryRing group={group} />
+        <div className="flex-1 min-w-0">
+          <h4 className="font-bold text-sm text-ink dark:text-mist truncate">{group.name}</h4>
+          <p className="text-[11px] text-ink-soft dark:text-mist-soft truncate">
+            {formatRelative(latest.createdAt)} · {group.items.length} update{group.items.length > 1 ? 's' : ''}
+          </p>
+        </div>
+      </button>
+    );
   };
 
   return (
-    <div className="pb-24">
-      {/* Prototype Banner */}
-      <div className="mx-4 mt-3 p-3.5 bg-white dark:bg-[#131B3E] border border-[#E4E8F7] dark:border-[#242D57] rounded-2xl text-xs text-[#5A6182] dark:text-[#AEB4DA] leading-relaxed shadow-xs">
-        <strong className="text-[#0E1430] dark:text-[#EEF1FF]">Status Stories —</strong> Tap any circle to view updates. Tap right to advance or hold to pause. Photos and videos stream via Bunny.net CDN.
-      </div>
-
-      {/* My Status */}
-      <div className="px-4 py-3">
-        <div
-          onClick={onOpenComposer}
-          className="flex items-center gap-3.5 p-2 rounded-2xl hover:bg-black/2 dark:hover:bg-white/5 active:bg-black/5 cursor-pointer transition-colors"
+    <div className="pb-4">
+      <div className="px-4 py-3 flex items-center gap-3.5">
+        <button
+          onClick={() => (feed.mine ? setViewer({ groups: [feed.mine], index: 0 }) : setComposer('text'))}
+          className="relative cursor-pointer"
+          aria-label={feed.mine ? 'View my status' : 'Add status'}
         >
-          <div className="relative">
-            <div className="w-13 h-13 rounded-full bg-white dark:bg-[#131B3E] border-2 border-dashed border-[#6E8CFF] flex items-center justify-center text-[#3B6BFA] font-bold text-xl shadow-xs">
-              <Plus className="w-6 h-6 stroke-[2.5]" />
-            </div>
-            <span className="absolute bottom-0 right-0 w-4 h-4 rounded-full bg-[#3B6BFA] text-white flex items-center justify-center text-[10px] font-bold border-2 border-white dark:border-[#131B3E]">
-              +
-            </span>
-          </div>
-
-          <div>
-            <h3 className="font-bold text-sm text-[#0E1430] dark:text-[#EEF1FF]">My Status</h3>
-            <p className="text-xs text-[#5A6182] dark:text-[#AEB4DA]">Tap to add status (text, photo, video)</p>
-          </div>
+          {feed.mine ? (
+            <StoryRing group={{ ...feed.mine, name: me.name, seen: false }} />
+          ) : (
+            <Avatar name={me.name} color={me.avatarColor} url={me.avatarUrl} size={56} shape="circle" />
+          )}
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              setComposer('text');
+            }}
+            className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-brand text-white flex items-center justify-center border-2 border-white dark:border-night"
+          >
+            <Plus className="w-3 h-3 stroke-[3]" />
+          </span>
+        </button>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-bold text-sm text-ink dark:text-mist">{t('myStatus')}</h3>
+          <p className="text-xs text-ink-soft dark:text-mist-soft truncate">
+            {latestMine
+              ? `${formatRelative(latestMine.createdAt)} · ${feed.mine!.items.length} update${feed.mine!.items.length > 1 ? 's' : ''}`
+              : 'Tap to share a text, photo or video for 24 hours'}
+          </p>
         </div>
+        <button
+          onClick={() => setComposer('media')}
+          aria-label="Photo or video status"
+          className="w-10 h-10 rounded-full bg-brand/10 text-brand flex items-center justify-center cursor-pointer hover:bg-brand/20"
+        >
+          <Camera className="w-5 h-5" />
+        </button>
       </div>
 
-      {/* Stories Horizontal Row */}
-      <div className="pt-2 pb-4">
-        <div className="px-4 mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-bold text-[#0E1430] dark:text-[#EEF1FF] tracking-tight">
-            Recent updates
-          </h2>
-          <span className="text-[11px] font-semibold text-[#3B6BFA]">{contacts.length} stories</span>
+      {feed.others.length === 0 ? (
+        <div className="mx-4 mt-3 p-5 bg-white dark:bg-night-card border border-line dark:border-night-line rounded-2xl text-center text-xs text-ink-soft dark:text-mist-soft">
+          No status updates yet. Updates from your contacts and people you chat with appear here and disappear after 24 hours.
         </div>
+      ) : (
+        <>
+          {unseen.length > 0 && (
+            <>
+              <h2 className="px-4 pt-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-ink-faint">{t('recentUpdates')}</h2>
+              {unseen.map((g) => row(g, unseen))}
+            </>
+          )}
+          {seen.length > 0 && (
+            <>
+              <h2 className="px-4 pt-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-ink-faint">Viewed updates</h2>
+              {seen.map((g) => row(g, seen))}
+            </>
+          )}
+        </>
+      )}
 
-        <div className="flex gap-3.5 overflow-x-auto px-4 no-scrollbar">
-          {contacts.map((contact, idx) => (
-            <div
-              key={contact.id}
-              onClick={() => onOpenStory(idx)}
-              className="flex flex-col items-center gap-1.5 flex-shrink-0 w-16 cursor-pointer group"
-            >
-              {/* Conic gradient ring */}
-              <div
-                className={`w-15 h-15 rounded-full p-[2.5px] transition-transform group-hover:scale-105 ${
-                  contact.seen
-                    ? 'bg-[#E4E8F7] dark:bg-[#242D57]'
-                    : 'bg-gradient-to-tr from-[#4DD8E8] via-[#3B6BFA] to-[#8A6CF2]'
-                }`}
-              >
-                <div
-                  className="w-full h-full rounded-full flex items-center justify-center font-bold text-white text-xs border-2 border-white dark:border-[#0B1130] shadow-xs"
-                  style={{ backgroundColor: contact.avatarColor }}
-                >
-                  {getInitials(contact.name)}
-                </div>
-              </div>
-
-              <span className="text-xs font-semibold text-[#5A6182] dark:text-[#AEB4DA] text-center w-full truncate">
-                {contact.name.split(' ')[0]}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Recent Updates List */}
-      <div className="mt-2 divide-y divide-[#E4E8F7]/60 dark:divide-[#242D57]/60 border-t border-[#E4E8F7] dark:border-[#242D57]">
-        {contacts.map((contact, idx) => {
-          const latestItem = contact.items[contact.items.length - 1];
-          return (
-            <div
-              key={contact.id}
-              onClick={() => onOpenStory(idx)}
-              className="flex items-center gap-3.5 px-4 py-3 hover:bg-black/2 dark:hover:bg-white/5 cursor-pointer transition-colors"
-            >
-              <div
-                className="w-11 h-11 rounded-full flex items-center justify-center font-bold text-white text-xs shadow-xs flex-shrink-0"
-                style={{ backgroundColor: contact.avatarColor }}
-              >
-                {getInitials(contact.name)}
-              </div>
-
-              <div className="flex-1 min-w-0">
-                <h4 className="font-bold text-xs text-[#0E1430] dark:text-[#EEF1FF] truncate">
-                  {contact.name}
-                </h4>
-                <p className="text-[11px] text-[#5A6182] dark:text-[#AEB4DA] truncate mt-0.5">
-                  {latestItem?.timeFormatted || 'recently'} · {contact.items.length} update{contact.items.length > 1 ? 's' : ''}
-                </p>
-              </div>
-
-              <span className="text-[11px] font-bold text-[#3B6BFA] bg-[#3B6BFA]/10 px-2.5 py-1 rounded-full">
-                View
-              </span>
-            </div>
-          );
-        })}
-      </div>
+      {viewer && <StatusViewer groups={viewer.groups} initialIndex={viewer.index} onClose={() => setViewer(null)} />}
+      {composer && <StatusComposer initialMode={composer} onClose={() => setComposer(null)} />}
     </div>
   );
 };

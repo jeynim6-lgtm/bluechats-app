@@ -1,120 +1,39 @@
 /**
- * Firebase Cloud Functions for Blue Chats
+ * OPTIONAL Firebase Cloud Functions for Blue Chats.
  *
- * Implements server-side Firebase Custom Claims assignment and verification.
- * Restricted CEO/Admin roles are managed strictly in this secure Cloud Function environment,
- * never exposed to the client, and never stored as readable database fields.
+ * The Express server already assigns the CEO claim on first verified sign-in (POST /api/admin/verify),
+ * so these functions are not required. Deploy them only if you want claims assigned the moment an
+ * account is created, without the user visiting the dashboard:
+ *
+ *   cd functions && npm install && cd ..
+ *   echo "CEO_PHONE_NUMBERS=+27820000000" > functions/.env
+ *   npx firebase-tools deploy --only functions      (requires the Blaze plan)
+ *
+ * Designated accounts come from CEO_PHONE_NUMBERS / CEO_EMAILS (comma-separated) in functions/.env.
  */
-
-const functions = require('firebase-functions');
+const functions = require('firebase-functions/v1');
 const admin = require('firebase-admin');
 
-if (!admin.apps.length) {
-  admin.initializeApp();
+admin.initializeApp();
+
+const list = (value) =>
+  String(value || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+const CEO_PHONES = new Set(list(process.env.CEO_PHONE_NUMBERS).map((p) => p.replace(/[^\d+]/g, '')));
+const CEO_EMAILS = new Set(list(process.env.CEO_EMAILS).map((e) => e.toLowerCase()));
+
+function isDesignated(user) {
+  if (user.phoneNumber && CEO_PHONES.has(user.phoneNumber)) return true;
+  return Boolean(user.email && user.emailVerified && CEO_EMAILS.has(user.email.toLowerCase()));
 }
 
-/**
- * Designated CEO/Admin emails kept strictly within the server-side Cloud Function environment.
- * These are never sent to the client or stored in readable client collections.
- */
-const DESIGNATED_CEO_ACCOUNTS = new Set([
-  'jeynim6@gmail.com',
-  'bleushorts@gmail.com',
-]);
-
-/**
- * Cloud Function: onUserCreated (Auth Trigger)
- * Automatically marks designated accounts with Firebase Custom Claims upon account creation.
- */
-exports.assignCeoCustomClaimsOnCreate = functions.auth.user().onCreate(async (user) => {
-  const email = (user.email || '').toLowerCase().trim();
-
-  if (DESIGNATED_CEO_ACCOUNTS.has(email)) {
-    try {
-      // Set Firebase Custom Claims: { role: 'ceo', admin: true, ceo: true }
-      await admin.auth().setCustomUserClaims(user.uid, {
-        role: 'ceo',
-        admin: true,
-        ceo: true,
-      });
-
-      console.log(`[Cloud Function] Custom claims assigned to user uid: ${user.uid}`);
-      return { success: true, uid: user.uid };
-    } catch (error) {
-      console.error(`[Cloud Function] Error assigning claims to uid: ${user.uid}`, error);
-      throw error;
-    }
-  }
-
-  // Standard user: set default role claim
-  await admin.auth().setCustomUserClaims(user.uid, {
-    role: 'user',
-    admin: false,
-    ceo: false,
-  });
-
-  return { success: true, uid: user.uid };
-});
-
-/**
- * Cloud Function: verifyCeoClaims (Callable HTTPS Function)
- * Cryptographically verifies that the caller possesses the verified 'ceo' custom claim.
- * The client CEO dashboard route queries this function before rendering.
- */
-exports.verifyCeoClaims = functions.https.onCall(async (data, context) => {
-  // 1. Ensure user is authenticated with Firebase Auth
-  if (!context.auth) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'The function must be called while authenticated.'
-    );
-  }
-
-  const { uid, token } = context.auth;
-
-  // 2. If claims are already attached in the decoded token
-  if (token.role === 'ceo' || token.admin === true || token.ceo === true) {
-    return {
-      authorized: true,
-      role: 'ceo',
-      claims: {
-        role: 'ceo',
-        admin: true,
-        ceo: true,
-      },
-    };
-  }
-
-  // 3. Check and refresh user record directly via Firebase Admin Auth
-  try {
-    const userRecord = await admin.auth().getUser(uid);
-    const email = (userRecord.email || '').toLowerCase().trim();
-
-    // If designated account, attach custom claims now if not yet attached
-    if (DESIGNATED_CEO_ACCOUNTS.has(email)) {
-      const claims = { role: 'ceo', admin: true, ceo: true };
-      await admin.auth().setCustomUserClaims(uid, claims);
-
-      return {
-        authorized: true,
-        role: 'ceo',
-        claims,
-        refreshed: true,
-      };
-    }
-
-    // Otherwise, access is denied
-    throw new functions.https.HttpsError(
-      'permission-denied',
-      'Access denied: Account lacks required CEO custom claims.'
-    );
-  } catch (error) {
-    if (error instanceof functions.https.HttpsError) {
-      throw error;
-    }
-    throw new functions.https.HttpsError(
-      'internal',
-      'Failed to verify security claims.'
-    );
-  }
+/** Attaches { role: 'ceo', admin: true, ceo: true } to designated accounts when they are created. */
+exports.assignCeoClaimsOnCreate = functions.auth.user().onCreate(async (user) => {
+  if (!isDesignated(user)) return null;
+  await admin.auth().setCustomUserClaims(user.uid, { ...(user.customClaims || {}), role: 'ceo', admin: true, ceo: true });
+  functions.logger.info(`CEO claims assigned to ${user.uid}`);
+  return null;
 });

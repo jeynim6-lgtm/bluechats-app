@@ -1,18 +1,56 @@
+/** Public profile — `users/{uid}`. Visible to signed-in users; contains no phone number. */
 export interface UserProfile {
-  id: string;
+  uid: string;
   name: string;
-  phone: string;
-  email?: string;
+  bio: string;
+  avatarUrl?: string | null;
+  avatarPath?: string | null;
+  avatarColor: string;
   country?: string;
-  avatar?: string;
-  bio?: string;
-  isOnline?: boolean;
-  lastSeen?: string;
-  role?: 'user' | 'admin' | 'ceo';
-  blockedUsers?: string[]; // IDs of blocked users
+  createdAt?: number;
+  lastSeen?: number;
 }
 
-export type MessageType = 'text' | 'voice' | 'image' | 'video' | 'file' | 'location' | 'contact' | 'system' | 'call';
+/** Private account data — `users/{uid}/private/account`. Owner (and CEO) only. */
+export interface PrivateAccount {
+  phone: string;
+  email?: string;
+  blocked: string[];
+}
+
+/** Personal address book entry — `users/{uid}/contacts/{id}`. */
+export interface Contact {
+  id: string;
+  uid: string | null; // null when the number is not on Blue Chats yet
+  name: string;
+  phone: string;
+  avatarColor: string;
+}
+
+export interface PersonRef {
+  uid: string;
+  name: string;
+  avatarColor: string;
+  avatarUrl?: string | null;
+}
+
+export type MessageType = 'text' | 'voice' | 'image' | 'video' | 'file' | 'location' | 'contact' | 'system';
+
+export interface MediaInfo {
+  url: string;
+  path?: string | null;
+  size?: number | null;
+  mime?: string | null;
+  name?: string | null;
+  duration?: number | null;
+}
+
+export interface ReplyRef {
+  id: string;
+  senderName: string;
+  text: string;
+  type: MessageType;
+}
 
 export interface ChatMessage {
   id: string;
@@ -20,161 +58,158 @@ export interface ChatMessage {
   senderId: string;
   senderName: string;
   type: MessageType;
-  text?: string;
-  mediaUrl?: string; // Bunny.net storage URL
-  mediaDirectUrl?: string;
-  mediaSize?: number;
-  mediaDuration?: number; // for audio/video in seconds
-  mimeType?: string;
-  location?: { lat: number; lng: number; address?: string };
-  contactCard?: { name: string; phone: string };
-  timestamp: number;
-  timeFormatted: string;
-  status: 'sent' | 'delivered' | 'read';
-  mine: boolean;
-  reactions?: Record<string, string>; // userId -> emoji
+  text?: string | null;
+  media?: MediaInfo | null;
+  location?: { lat: number; lng: number; accuracy?: number | null } | null;
+  contact?: { name: string; phone: string; uid?: string | null } | null;
+  replyTo?: ReplyRef | null;
+  reactions: Record<string, string>;
+  createdAt: number;
+  pending: boolean;
+  deleted?: boolean;
 }
 
-export interface ChatSummary {
-  id: string;
+export interface ChatMember {
   name: string;
-  isGroup: boolean;
+  avatarColor: string;
+  avatarUrl?: string | null;
+}
+
+export interface Chat {
+  id: string;
+  type: 'direct' | 'group';
   participants: string[];
-  avatar?: string;
-  avatarColor: string;
-  lastMessage?: string;
-  lastMessageType?: MessageType;
-  lastMessageTime: string;
-  lastMessageTimestamp: number;
-  unreadCount: number;
-  mine: boolean;
-  online?: boolean;
-  about?: string;
-  country?: string;
+  members: Record<string, ChatMember>;
+  name?: string;
+  avatarColor?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  lastMessage?: { text: string; type: MessageType; senderId: string; senderName: string; at: number } | null;
+  unread: Record<string, number>;
+  readAt: Record<string, number>;
+  typing: Record<string, number>;
 }
 
-export interface StatusItem {
+export type CallType = 'voice' | 'video';
+export type CallStatus = 'ringing' | 'accepted' | 'declined' | 'ended' | 'missed' | 'busy' | 'failed' | 'cancelled';
+
+/** `calls/{id}` — WebRTC signaling document that doubles as call history. */
+export interface CallDoc {
   id: string;
-  type: 'text' | 'image' | 'video';
-  text?: string;
-  mediaUrl?: string;
-  bg: string;
-  timestamp: number;
-  timeFormatted: string;
-  views: number;
-  starred?: boolean;
-  sponsored?: boolean;
-  sponsor?: string;
-  cta?: string;
+  callerId: string;
+  calleeId: string;
+  participants: string[];
+  caller: ChatMember;
+  callee: ChatMember;
+  type: CallType;
+  status: CallStatus;
+  offer?: { type: RTCSdpType; sdp: string };
+  answer?: { type: RTCSdpType; sdp: string };
+  createdAt: number;
+  answeredAt?: number | null;
+  endedAt?: number | null;
+  endedBy?: string | null;
+  duration?: number | null;
+  recording?: Record<string, boolean>;
+  recordings?: Record<string, string>;
 }
 
-export interface StatusContact {
-  id: string;
-  name: string;
-  avatarColor: string;
-  items: StatusItem[];
-  seen?: boolean;
-}
-
+/** History row as shown in the Calls tab. */
 export interface CallRecord {
   id: string;
   partnerId: string;
   partnerName: string;
   avatarColor: string;
-  type: 'voice' | 'video';
+  avatarUrl?: string | null;
+  type: CallType;
   direction: 'incoming' | 'outgoing' | 'missed';
+  status: CallStatus;
   timestamp: number;
-  timeFormatted: string;
   durationSeconds: number;
-  recordingUrl?: string; // Stored in Bunny.net
+  recordingUrl?: string;
 }
 
-export interface WalletTransaction {
+export interface StatusItem {
   id: string;
-  title: string;
-  subtitle: string;
-  amount: number;
-  type: 'credit' | 'debit';
-  timestamp: number;
-  timeFormatted: string;
-  category: 'transfer' | 'deposit' | 'payment' | 'reward';
+  authorId: string;
+  author: ChatMember;
+  type: 'text' | 'image' | 'video';
+  text?: string | null;
+  mediaUrl?: string | null;
+  mediaPath?: string | null;
+  bg: string;
+  createdAt: number;
+  expiresAt: number;
+  viewers: string[];
+  // sponsored cards injected by the viewer
+  sponsored?: boolean;
+  sponsorId?: string;
+  sponsor?: string;
+  cta?: string;
+  ctaUrl?: string;
 }
 
-export interface BunnyUploadResponse {
-  success: boolean;
-  storage: string;
-  storageZone: string;
-  storagePath: string;
-  url: string;
-  directBunnyUrl?: string;
-  size: number;
-  contentType: string;
-  uploadedAt: string;
+export interface StatusGroup {
+  authorId: string;
+  name: string;
+  avatarColor: string;
+  avatarUrl?: string | null;
+  items: StatusItem[];
+  seen: boolean;
+  isMine: boolean;
 }
 
-// 1. Discover Feed Types
 export interface DiscoverPost {
   id: string;
   uid: string;
-  authorName: string;
-  authorAvatar?: string;
-  authorColor: string;
+  author: ChatMember;
   country: string;
   countryCode: string;
-  mediaUrl: string; // Stored in Bunny.net
+  mediaUrl: string;
+  mediaPath?: string | null;
   mediaType: 'image' | 'video';
   caption: string;
   commentCount: number;
   viewCount: number;
   starCount: number;
-  starred?: boolean;
-  isFollowing?: boolean;
   createdAt: number;
-  timeFormatted: string;
 }
 
 export interface DiscoverComment {
   id: string;
   postId: string;
   uid: string;
-  authorName: string;
-  authorAvatar?: string;
-  authorColor?: string;
+  author: ChatMember;
   text: string;
   createdAt: number;
-  timeFormatted: string;
 }
 
 export interface FriendRequest {
   id: string;
   fromUid: string;
-  fromName: string;
-  fromAvatarColor: string;
-  fromCountry?: string;
   toUid: string;
-  toName: string;
+  from: ChatMember & { country?: string };
+  to: ChatMember;
   status: 'pending' | 'accepted' | 'declined';
   createdAt: number;
-  timeFormatted: string;
 }
 
-// 2. Wallet Applicant pre-registration
 export type DocType = 'id' | 'passport' | 'drivers_licence' | 'asylum_doc';
 
 export interface WalletApplicant {
-  id: string;
   uid: string;
   name: string;
   email?: string;
   phone: string;
   docType: DocType;
   docNumberMasked: string;
+  docHash?: string;
   termsAccepted: boolean;
   status: 'pre-registered';
   appliedAt: number;
 }
 
-// 3. Bug Report
 export interface BugReport {
   id: string;
   uid: string;
@@ -183,43 +218,46 @@ export interface BugReport {
   description: string;
   screen: string;
   appVersion: string;
+  userAgent?: string;
   status: 'open' | 'investigating' | 'resolved';
   createdAt: number;
-  timeFormatted: string;
 }
 
-// 4. Admin & CEO Dashboard
-export interface AdminUserRecord {
+export interface UserReport {
   id: string;
-  name: string;
-  email: string;
-  phone: string;
-  country: string;
-  joinDate: string;
-  role: 'user' | 'admin' | 'ceo';
-  walletRegistered: boolean;
+  reporterId: string;
+  reporterName?: string;
+  targetUid: string;
+  targetName: string;
+  reason: string;
+  status: 'open' | 'reviewed';
+  createdAt: number;
 }
 
-export interface AdRevenueBreakdown {
-  monthly: Array<{
-    month: string;
-    year: number;
-    impressions: number;
-    clicks: number;
-    revenueZAR: number;
-  }>;
-  yearly: Array<{
-    year: number;
-    impressions: number;
-    clicks: number;
-    revenueZAR: number;
-  }>;
+export interface AdminUserRecord {
+  uid: string;
+  name: string;
+  phone?: string;
+  country?: string;
+  createdAt?: number;
+  lastSeen?: number;
 }
+
+export interface AdStat {
+  id: string;
+  adId: string;
+  month: string;
+  impressions: number;
+  clicks: number;
+}
+
+type HealthEntry = { status: 'healthy' | 'degraded' | 'failing'; message: string };
 
 export interface HealthCheckResult {
-  auth: { status: 'healthy' | 'degraded' | 'failing'; message: string };
-  firestore: { status: 'healthy' | 'degraded' | 'failing'; message: string };
-  server: { status: 'healthy' | 'degraded' | 'failing'; message: string };
-  bunny: { status: 'healthy' | 'degraded' | 'failing'; message: string };
+  auth: HealthEntry;
+  firestore: HealthEntry;
+  server: HealthEntry;
+  bunny: HealthEntry;
+  webrtc: HealthEntry;
   timestamp: string;
 }

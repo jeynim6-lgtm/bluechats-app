@@ -1,15 +1,20 @@
 {
-  "name": "react-example",
+  "name": "bluechats",
   "private": true,
-  "version": "0.0.0",
+  "version": "3.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
-    "start": "node server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --target=node18 --outfile=server.js --log-level=warning",
+    "start": "NODE_ENV=production node server.js",
     "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit",
     "grant-ceo-claims": "tsx scripts/grant-ceo-claims.ts",
-    "lint": "tsc --noEmit"
+    "emulators": "npx -y firebase-tools@latest emulators:start --only auth,firestore --project demo-bluechats",
+    "dev:emulators": "FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_API_KEY=demo-key FIREBASE_AUTH_DOMAIN=demo-bluechats.firebaseapp.com FIREBASE_PROJECT_ID=demo-bluechats FIREBASE_APP_ID=1:000000000000:web:demo tsx server.ts",
+    "test:rules": "npx -y firebase-tools@latest emulators:exec --only firestore --project demo-bluechats-rules \"tsx --test tests/firestore.rules.test.ts\"",
+    "test:e2e": "npx -y firebase-tools@latest emulators:exec --only auth,firestore --project demo-bluechats \"tsx tests/e2e/run.ts\"",
+    "deploy:rules": "npx -y firebase-tools@latest deploy --only firestore:rules,firestore:indexes"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -28,6 +33,7 @@
     "vite": "^8.3.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/canvas-confetti": "^1.9.0",
     "@types/express": "^4.17.21",
     "@types/multer": "^2.2.0",
@@ -36,6 +42,7 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "playwright": "^1.63.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"
