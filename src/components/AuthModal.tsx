@@ -30,6 +30,8 @@ export function authErrorMessage(err: unknown): string {
     'auth/network-request-failed': 'Network error. Check your internet connection and try again.',
     'auth/operation-not-allowed':
       'Phone sign-in is not enabled for this Firebase project. Enable it under Authentication → Sign-in method → Phone.',
+    'auth/configuration-not-found':
+      'Phone sign-in is not configured yet. Go to Firebase Console → Authentication → Sign-in method and enable "Phone".',
     'auth/unauthorized-domain': `This website (${window.location.hostname}) is not an authorised domain. Add it under Firebase Authentication → Settings → Authorized domains.`,
     'auth/billing-not-enabled': 'SMS sign-in requires the Firebase Blaze (pay-as-you-go) plan on this project.',
     'auth/invalid-api-key': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',

@@ -28,8 +28,8 @@ export const SetupRequired: React.FC<SetupRequiredProps> = ({ missing = [], erro
           {error ? <AlertTriangle className="w-6 h-6" /> : <Settings2 className="w-6 h-6" />}
         </div>
         <div>
-          <h1 className="font-bold text-base text-ink dark:text-mist">{error ? `${BRANDING.appName} can't start` : 'Finish setting up'}</h1>
-          <p className="text-xs text-ink-soft dark:text-mist-soft">{error ? 'The server could not be reached.' : 'Firebase is not configured on the server yet.'}</p>
+          <h1 className="font-bold text-base text-ink dark:text-mist">{error ? `${BRANDING.appName} startup issue` : 'Finish setting up'}</h1>
+          <p className="text-xs text-ink-soft dark:text-mist-soft">{error ? 'An error occurred while initializing the app.' : 'Firebase is not configured on the server yet.'}</p>
         </div>
       </div>
 
