@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { RecaptchaVerifier, signInWithPhoneNumber, type ConfirmationResult } from 'firebase/auth';
 import { ArrowLeft, Lock, Users, MessageSquareText, ShieldCheck, ChevronDown } from 'lucide-react';
-import { getFirebaseAuth } from '../lib/firebase';
+import { getFirebaseAuth, getRuntimeConfig } from '../lib/firebase';
 import { COUNTRIES, DEFAULT_COUNTRY, toE164, formatPhone, countryForNumber } from '../lib/phone';
 import { createProfile, countUsers } from '../services/users';
 import { submitWalletApplication } from '../services/wallet';
@@ -17,6 +17,11 @@ const RESEND_SECONDS = 60;
 
 export function authErrorMessage(err: unknown): string {
   const code = (err as { code?: string })?.code || '';
+  const project = getRuntimeConfig()?.firebase?.projectId || 'your Firebase project';
+  const host = window.location.hostname;
+  if (code.startsWith('auth/requests-from-referer')) {
+    return `Your Firebase API key is restricted and doesn't allow ${host}. In Google Cloud console → APIs & Services → Credentials, edit the "Browser key" and add ${host} to its website restrictions (or remove the restriction).`;
+  }
   const messages: Record<string, string> = {
     'auth/invalid-phone-number': 'That phone number is not valid. Check the country code and number.',
     'auth/missing-phone-number': 'Enter your phone number.',
@@ -28,11 +33,11 @@ export function authErrorMessage(err: unknown): string {
     'auth/captcha-check-failed': 'The security check failed. Please try again.',
     'auth/invalid-app-credential': 'The security check failed. Refresh the page and try again.',
     'auth/network-request-failed': 'Network error. Check your internet connection and try again.',
-    'auth/operation-not-allowed':
-      'Phone sign-in is not enabled for this Firebase project. Enable it under Authentication → Sign-in method → Phone.',
-    'auth/configuration-not-found':
-      'Phone sign-in is not configured yet. Go to Firebase Console → Authentication → Sign-in method and enable "Phone".',
-    'auth/unauthorized-domain': `This website (${window.location.hostname}) is not an authorised domain. Add it under Firebase Authentication → Settings → Authorized domains.`,
+    'auth/operation-not-allowed': `Phone sign-in is turned off in the Firebase project "${project}". In that project open Authentication → Sign-in method → Phone → Enable → Save. If you enabled it somewhere else, the app is connected to a different project — check src/config/firebase.ts.`,
+    'auth/configuration-not-found': `Firebase Authentication hasn't been set up in project "${project}" yet. Open Authentication in the Firebase console, click "Get started", then enable Phone.`,
+    'auth/unauthorized-domain': `This website (${host}) isn't allowed to sign in to project "${project}". Add ${host} under Firebase → Authentication → Settings → Authorized domains.`,
+    'auth/app-not-authorized': `This website isn't allowed to use the Firebase API key for project "${project}". Check the key's restrictions in Google Cloud console → APIs & Services → Credentials.`,
+    'auth/invalid-verification-id': 'This sign-in attempt expired. Tap “Change number” and send a new code.',
     'auth/billing-not-enabled': 'SMS sign-in requires the Firebase Blaze (pay-as-you-go) plan on this project.',
     'auth/invalid-api-key': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',
     'auth/api-key-not-valid.-please-pass-a-valid-api-key.': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',
@@ -74,6 +79,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onProfileCreated, onFinish
   const [userCount, setUserCount] = useState<number | null>(null);
 
   const [legalModal, setLegalModal] = useState<LegalDocType>(null);
+  const configProblems = getRuntimeConfig()?.problems || [];
 
   useEffect(() => {
     if (status === 'needsProfile' && (step === 'phone' || step === 'code')) setStep('profile');
@@ -237,6 +243,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onProfileCreated, onFinish
 
       <div className="flex-1 p-6 space-y-4">
         {(error || authError) && <ErrorBanner message={error || authError || ''} onDismiss={error ? () => setError('') : undefined} />}
+
+        {step === 'phone' && configProblems.length > 0 && (
+          <div className="p-3 rounded-2xl bg-gold/10 border border-gold/30 text-xs text-ink dark:text-mist space-y-1">
+            <p className="font-bold text-gold">Your Firebase config looks wrong — sign-in will fail until it's fixed:</p>
+            {configProblems.map((p) => (
+              <p key={p}>• {p}</p>
+            ))}
+          </div>
+        )}
 
         {step === 'phone' && (
           <form

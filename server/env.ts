@@ -1,3 +1,5 @@
+import { FIREBASE_CONFIG_SNIPPET, parseFirebaseConfig, type FirebaseWebConfig } from '../src/config/firebase.ts';
+
 /**
  * Centralised, validated server configuration.
  *
@@ -18,6 +20,24 @@ function list(...names: string[]): string[] {
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
+}
+
+// Firebase web config sources, highest priority first:
+//   1. individual FIREBASE_* variables
+//   2. FIREBASE_WEB_CONFIG — the whole console snippet (or JSON) in one variable
+//   3. src/config/firebase.ts — snippet pasted into the repo
+const firebaseFromEnvSnippet = parseFirebaseConfig(read('FIREBASE_WEB_CONFIG'));
+const firebaseFromFile = parseFirebaseConfig(FIREBASE_CONFIG_SNIPPET);
+
+function firebaseValue(key: keyof FirebaseWebConfig, ...envNames: string[]): string {
+  return read(...envNames) || firebaseFromEnvSnippet[key] || firebaseFromFile[key] || '';
+}
+
+function firebaseSource(): string | null {
+  if (read('FIREBASE_API_KEY', 'VITE_FIREBASE_API_KEY')) return 'environment variables';
+  if (firebaseFromEnvSnippet.apiKey) return 'FIREBASE_WEB_CONFIG variable';
+  if (firebaseFromFile.apiKey) return 'src/config/firebase.ts';
+  return null;
 }
 
 const BUNNY_REGION_HOSTS: Record<string, string> = {
@@ -49,14 +69,15 @@ export const env = {
 
   /** Public Firebase web config — safe to send to browsers. */
   firebase: {
-    apiKey: read('FIREBASE_API_KEY', 'VITE_FIREBASE_API_KEY'),
-    authDomain: read('FIREBASE_AUTH_DOMAIN', 'VITE_FIREBASE_AUTH_DOMAIN'),
-    projectId: read('FIREBASE_PROJECT_ID', 'VITE_FIREBASE_PROJECT_ID', 'GCLOUD_PROJECT'),
-    storageBucket: read('FIREBASE_STORAGE_BUCKET', 'VITE_FIREBASE_STORAGE_BUCKET'),
-    messagingSenderId: read('FIREBASE_MESSAGING_SENDER_ID', 'VITE_FIREBASE_MESSAGING_SENDER_ID'),
-    appId: read('FIREBASE_APP_ID', 'VITE_FIREBASE_APP_ID'),
-    measurementId: read('FIREBASE_MEASUREMENT_ID', 'VITE_FIREBASE_MEASUREMENT_ID'),
+    apiKey: firebaseValue('apiKey', 'FIREBASE_API_KEY', 'VITE_FIREBASE_API_KEY'),
+    authDomain: firebaseValue('authDomain', 'FIREBASE_AUTH_DOMAIN', 'VITE_FIREBASE_AUTH_DOMAIN'),
+    projectId: firebaseValue('projectId', 'FIREBASE_PROJECT_ID', 'VITE_FIREBASE_PROJECT_ID', 'GCLOUD_PROJECT'),
+    storageBucket: firebaseValue('storageBucket', 'FIREBASE_STORAGE_BUCKET', 'VITE_FIREBASE_STORAGE_BUCKET'),
+    messagingSenderId: firebaseValue('messagingSenderId', 'FIREBASE_MESSAGING_SENDER_ID', 'VITE_FIREBASE_MESSAGING_SENDER_ID'),
+    appId: firebaseValue('appId', 'FIREBASE_APP_ID', 'VITE_FIREBASE_APP_ID'),
+    measurementId: firebaseValue('measurementId', 'FIREBASE_MEASUREMENT_ID', 'VITE_FIREBASE_MEASUREMENT_ID'),
   },
+  firebaseSource: firebaseSource(),
 
   /** Standard Firebase emulator variables (also read by firebase-admin). */
   emulators: {
@@ -111,4 +132,29 @@ export function missingFirebaseConfig(): string[] {
     ['appId', 'FIREBASE_APP_ID'],
   ];
   return required.filter(([key]) => !env.firebase[key]).map(([, name]) => name);
+}
+
+// Values from the app's original generated code. Google rejects this API key, and the app ID is not a real one.
+const KNOWN_BAD_API_KEYS = ['AIzaSyBwAgQfJzsuLWg073kD3NJ71UVBRizEs0Y'];
+const KNOWN_BAD_APP_IDS = ['1:64519650154:web:bluechats'];
+
+/** Human-readable problems with a Firebase config that is present but obviously wrong. */
+export function firebaseConfigProblems(): string[] {
+  const { apiKey, appId, authDomain, projectId } = env.firebase;
+  if (env.emulators.auth) return []; // emulator mode accepts placeholder values
+  const problems: string[] = [];
+  if (KNOWN_BAD_API_KEYS.includes(apiKey)) {
+    problems.push('The API key is the placeholder from the original app code, which Google rejects. Copy the apiKey from your own Firebase web app.');
+  } else if (apiKey && !/^AIza[0-9A-Za-z_-]{35}$/.test(apiKey)) {
+    problems.push('The apiKey does not look like a Firebase web API key (it should start with "AIza" and be 39 characters).');
+  }
+  if (KNOWN_BAD_APP_IDS.includes(appId)) {
+    problems.push('The appId is the placeholder from the original app code. Copy the appId from your own Firebase web app (it looks like 1:1234567890:web:abc123def456).');
+  } else if (appId && !/^1:\d+:web:[0-9a-f]+$/i.test(appId)) {
+    problems.push('The appId does not look right — it should look like 1:1234567890:web:abc123def456.');
+  }
+  if (authDomain && projectId && !authDomain.includes('.')) {
+    problems.push('The authDomain should be a domain such as your-project.firebaseapp.com.');
+  }
+  return problems;
 }

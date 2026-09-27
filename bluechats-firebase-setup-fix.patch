@@ -1,0 +1,439 @@
+From 26ecf14f6d22a2064cd9da97a04ac1030268b786 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 07:45:59 +0000
+Subject: [PATCH] Fix "Finish setting up" screen blocking phone sign-in
+
+The setup screen appeared because the server had no Firebase web config,
+but its wording ("enable Phone sign-in...") suggested the Phone provider
+was the problem, so enabling it and adding test numbers didn't help.
+
+- Accept the Firebase web config pasted into src/config/firebase.ts (the
+  console snippet as-is), or as one FIREBASE_WEB_CONFIG variable, in
+  addition to the individual FIREBASE_* variables
+- Detect obviously wrong configs, including the invalid API key and app
+  ID from the original code, and warn on the sign-in screen
+- Rewrite the setup screen as a numbered checklist that explains the
+  config is what's missing and shows the exact domain to authorize
+- Sign-in errors now name the Firebase project and domain in use and
+  cover more codes (auth not initialised, API key restrictions)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MyCre331b5gFD1kCpkyBL6
+---
+ .env.example                   |  3 ++
+ README.md                      |  4 +-
+ server.ts                      | 12 ++++-
+ server/env.ts                  | 60 ++++++++++++++++++++---
+ src/components/AuthModal.tsx   | 25 ++++++++--
+ src/components/BootScreens.tsx | 89 ++++++++++++++++++++++++++--------
+ src/config/firebase.ts         | 41 ++++++++++++++++
+ src/lib/firebase.ts            |  3 ++
+ 8 files changed, 203 insertions(+), 34 deletions(-)
+ create mode 100644 src/config/firebase.ts
+
+diff --git a/.env.example b/.env.example
+index 794ff2c..de623f5 100644
+--- a/.env.example
++++ b/.env.example
+@@ -6,7 +6,10 @@
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+ # ── Firebase web app (REQUIRED) ──────────────────────────────────────────────
++# EASIEST: paste the config snippet into src/config/firebase.ts instead (it's public, safe to commit).
++# Or set FIREBASE_WEB_CONFIG to the whole snippet, or the individual variables below.
+ # Firebase console → Project settings → General → Your apps → Web app → SDK config
++FIREBASE_WEB_CONFIG=""
+ FIREBASE_API_KEY=""
+ FIREBASE_AUTH_DOMAIN=""          # e.g. your-project.firebaseapp.com
+ FIREBASE_PROJECT_ID=""
+diff --git a/README.md b/README.md
+index 6e857c9..5e0d0f6 100644
+--- a/README.md
++++ b/README.md
+@@ -33,8 +33,8 @@ WebRTC media flows directly between the two devices (or via your TURN relay).
+ ## Go-live checklist
+ 
+ 1. **Firebase project**
+-   - Create a Web app and copy its config into the `FIREBASE_*` variables (see `.env.example`).
+-   - *Authentication → Sign-in method →* enable **Phone**. SMS sign-in requires the Blaze plan for production volumes; add test numbers under *Phone numbers for testing* for development.
++   - Create a Web app (*Project settings → Your apps → Add app → Web*) and paste its `firebaseConfig` block into **`src/config/firebase.ts`** (these values are public and safe to commit). Alternatively set the `FIREBASE_*` or `FIREBASE_WEB_CONFIG` environment variables. Enabling Phone sign-in alone is not enough — the app needs this config to know which project to use.
++   - *Authentication → Sign-in method →* enable **Phone**. The iOS/Android steps in Firebase's docs (APNs, SHA fingerprints) are for native apps and aren't needed for this web app. SMS sign-in requires the Blaze plan for production volumes; add test numbers under *Phone numbers for testing* for development.
+    - *Authentication → Settings → Authorized domains →* add the domain the app is served from.
+    - Deploy rules and indexes: set your project ID in `.firebaserc`, then run `npm run deploy:rules`.
+    - Recommended: *Firestore → TTL policies →* collection `statuses`, field `expiresAt` (auto-deletes expired stories).
+diff --git a/server.ts b/server.ts
+index 9010edc..e197750 100644
+--- a/server.ts
++++ b/server.ts
+@@ -2,7 +2,7 @@ import 'dotenv/config';
+ import express, { type Request, type Response, type NextFunction } from 'express';
+ import path from 'path';
+ import { fileURLToPath } from 'url';
+-import { env, bunnyConfigured, turnConfigured, missingFirebaseConfig } from './server/env.ts';
++import { env, bunnyConfigured, turnConfigured, missingFirebaseConfig, firebaseConfigProblems } from './server/env.ts';
+ import { mediaRouter } from './server/media.ts';
+ import { webrtcRouter } from './server/webrtc.ts';
+ import { adminRouter } from './server/admin.ts';
+@@ -34,6 +34,8 @@ async function startServer() {
+     res.json({
+       firebase: missing.length ? null : env.firebase,
+       missing,
++      problems: missing.length ? [] : firebaseConfigProblems(),
++      firebaseSource: env.firebaseSource,
+       emulators: env.emulators.auth || env.emulators.firestore
+         ? { auth: env.emulators.auth || null, firestore: env.emulators.firestore || null }
+         : null,
+@@ -82,7 +84,13 @@ async function startServer() {
+   app.listen(env.port, '0.0.0.0', () => {
+     console.log(`Blue Chats server listening on http://0.0.0.0:${env.port} (${env.isProd ? 'production' : 'development'})`);
+     const missing = missingFirebaseConfig();
+-    if (missing.length) console.warn(`⚠  Firebase not configured — missing: ${missing.join(', ')}`);
++    if (missing.length) {
++      console.warn(`⚠  Firebase web config not found — missing: ${missing.join(', ')}`);
++      console.warn('   Paste your config into src/config/firebase.ts, or set the FIREBASE_* / FIREBASE_WEB_CONFIG variables.');
++    } else {
++      console.log(`   Firebase project "${env.firebase.projectId}" (config from ${env.firebaseSource || 'environment'})`);
++      firebaseConfigProblems().forEach((p) => console.warn(`⚠  Firebase config: ${p}`));
++    }
+     if (env.emulators.auth || env.emulators.firestore) {
+       console.log(`   Using Firebase emulators: auth=${env.emulators.auth || '-'} firestore=${env.emulators.firestore || '-'}`);
+     }
+diff --git a/server/env.ts b/server/env.ts
+index 9c95545..9588427 100644
+--- a/server/env.ts
++++ b/server/env.ts
+@@ -1,3 +1,5 @@
++import { FIREBASE_CONFIG_SNIPPET, parseFirebaseConfig, type FirebaseWebConfig } from '../src/config/firebase.ts';
++
+ /**
+  * Centralised, validated server configuration.
+  *
+@@ -20,6 +22,24 @@ function list(...names: string[]): string[] {
+     .filter(Boolean);
+ }
+ 
++// Firebase web config sources, highest priority first:
++//   1. individual FIREBASE_* variables
++//   2. FIREBASE_WEB_CONFIG — the whole console snippet (or JSON) in one variable
++//   3. src/config/firebase.ts — snippet pasted into the repo
++const firebaseFromEnvSnippet = parseFirebaseConfig(read('FIREBASE_WEB_CONFIG'));
++const firebaseFromFile = parseFirebaseConfig(FIREBASE_CONFIG_SNIPPET);
++
++function firebaseValue(key: keyof FirebaseWebConfig, ...envNames: string[]): string {
++  return read(...envNames) || firebaseFromEnvSnippet[key] || firebaseFromFile[key] || '';
++}
++
++function firebaseSource(): string | null {
++  if (read('FIREBASE_API_KEY', 'VITE_FIREBASE_API_KEY')) return 'environment variables';
++  if (firebaseFromEnvSnippet.apiKey) return 'FIREBASE_WEB_CONFIG variable';
++  if (firebaseFromFile.apiKey) return 'src/config/firebase.ts';
++  return null;
++}
++
+ const BUNNY_REGION_HOSTS: Record<string, string> = {
+   de: 'storage.bunnycdn.com',
+   falkenstein: 'storage.bunnycdn.com',
+@@ -49,14 +69,15 @@ export const env = {
+ 
+   /** Public Firebase web config — safe to send to browsers. */
+   firebase: {
+-    apiKey: read('FIREBASE_API_KEY', 'VITE_FIREBASE_API_KEY'),
+-    authDomain: read('FIREBASE_AUTH_DOMAIN', 'VITE_FIREBASE_AUTH_DOMAIN'),
+-    projectId: read('FIREBASE_PROJECT_ID', 'VITE_FIREBASE_PROJECT_ID', 'GCLOUD_PROJECT'),
+-    storageBucket: read('FIREBASE_STORAGE_BUCKET', 'VITE_FIREBASE_STORAGE_BUCKET'),
+-    messagingSenderId: read('FIREBASE_MESSAGING_SENDER_ID', 'VITE_FIREBASE_MESSAGING_SENDER_ID'),
+-    appId: read('FIREBASE_APP_ID', 'VITE_FIREBASE_APP_ID'),
+-    measurementId: read('FIREBASE_MEASUREMENT_ID', 'VITE_FIREBASE_MEASUREMENT_ID'),
++    apiKey: firebaseValue('apiKey', 'FIREBASE_API_KEY', 'VITE_FIREBASE_API_KEY'),
++    authDomain: firebaseValue('authDomain', 'FIREBASE_AUTH_DOMAIN', 'VITE_FIREBASE_AUTH_DOMAIN'),
++    projectId: firebaseValue('projectId', 'FIREBASE_PROJECT_ID', 'VITE_FIREBASE_PROJECT_ID', 'GCLOUD_PROJECT'),
++    storageBucket: firebaseValue('storageBucket', 'FIREBASE_STORAGE_BUCKET', 'VITE_FIREBASE_STORAGE_BUCKET'),
++    messagingSenderId: firebaseValue('messagingSenderId', 'FIREBASE_MESSAGING_SENDER_ID', 'VITE_FIREBASE_MESSAGING_SENDER_ID'),
++    appId: firebaseValue('appId', 'FIREBASE_APP_ID', 'VITE_FIREBASE_APP_ID'),
++    measurementId: firebaseValue('measurementId', 'FIREBASE_MEASUREMENT_ID', 'VITE_FIREBASE_MEASUREMENT_ID'),
+   },
++  firebaseSource: firebaseSource(),
+ 
+   /** Standard Firebase emulator variables (also read by firebase-admin). */
+   emulators: {
+@@ -112,3 +133,28 @@ export function missingFirebaseConfig(): string[] {
+   ];
+   return required.filter(([key]) => !env.firebase[key]).map(([, name]) => name);
+ }
++
++// Values from the app's original generated code. Google rejects this API key, and the app ID is not a real one.
++const KNOWN_BAD_API_KEYS = ['AIzaSyBwAgQfJzsuLWg073kD3NJ71UVBRizEs0Y'];
++const KNOWN_BAD_APP_IDS = ['1:64519650154:web:bluechats'];
++
++/** Human-readable problems with a Firebase config that is present but obviously wrong. */
++export function firebaseConfigProblems(): string[] {
++  const { apiKey, appId, authDomain, projectId } = env.firebase;
++  if (env.emulators.auth) return []; // emulator mode accepts placeholder values
++  const problems: string[] = [];
++  if (KNOWN_BAD_API_KEYS.includes(apiKey)) {
++    problems.push('The API key is the placeholder from the original app code, which Google rejects. Copy the apiKey from your own Firebase web app.');
++  } else if (apiKey && !/^AIza[0-9A-Za-z_-]{35}$/.test(apiKey)) {
++    problems.push('The apiKey does not look like a Firebase web API key (it should start with "AIza" and be 39 characters).');
++  }
++  if (KNOWN_BAD_APP_IDS.includes(appId)) {
++    problems.push('The appId is the placeholder from the original app code. Copy the appId from your own Firebase web app (it looks like 1:1234567890:web:abc123def456).');
++  } else if (appId && !/^1:\d+:web:[0-9a-f]+$/i.test(appId)) {
++    problems.push('The appId does not look right — it should look like 1:1234567890:web:abc123def456.');
++  }
++  if (authDomain && projectId && !authDomain.includes('.')) {
++    problems.push('The authDomain should be a domain such as your-project.firebaseapp.com.');
++  }
++  return problems;
++}
+diff --git a/src/components/AuthModal.tsx b/src/components/AuthModal.tsx
+index f676c7a..3dfbcbf 100644
+--- a/src/components/AuthModal.tsx
++++ b/src/components/AuthModal.tsx
+@@ -1,7 +1,7 @@
+ import React, { useEffect, useRef, useState } from 'react';
+ import { RecaptchaVerifier, signInWithPhoneNumber, type ConfirmationResult } from 'firebase/auth';
+ import { ArrowLeft, Lock, Users, MessageSquareText, ShieldCheck, ChevronDown } from 'lucide-react';
+-import { getFirebaseAuth } from '../lib/firebase';
++import { getFirebaseAuth, getRuntimeConfig } from '../lib/firebase';
+ import { COUNTRIES, DEFAULT_COUNTRY, toE164, formatPhone, countryForNumber } from '../lib/phone';
+ import { createProfile, countUsers } from '../services/users';
+ import { submitWalletApplication } from '../services/wallet';
+@@ -17,6 +17,11 @@ const RESEND_SECONDS = 60;
+ 
+ export function authErrorMessage(err: unknown): string {
+   const code = (err as { code?: string })?.code || '';
++  const project = getRuntimeConfig()?.firebase?.projectId || 'your Firebase project';
++  const host = window.location.hostname;
++  if (code.startsWith('auth/requests-from-referer')) {
++    return `Your Firebase API key is restricted and doesn't allow ${host}. In Google Cloud console → APIs & Services → Credentials, edit the "Browser key" and add ${host} to its website restrictions (or remove the restriction).`;
++  }
+   const messages: Record<string, string> = {
+     'auth/invalid-phone-number': 'That phone number is not valid. Check the country code and number.',
+     'auth/missing-phone-number': 'Enter your phone number.',
+@@ -28,9 +33,11 @@ export function authErrorMessage(err: unknown): string {
+     'auth/captcha-check-failed': 'The security check failed. Please try again.',
+     'auth/invalid-app-credential': 'The security check failed. Refresh the page and try again.',
+     'auth/network-request-failed': 'Network error. Check your internet connection and try again.',
+-    'auth/operation-not-allowed':
+-      'Phone sign-in is not enabled for this Firebase project. Enable it under Authentication → Sign-in method → Phone.',
+-    'auth/unauthorized-domain': `This website (${window.location.hostname}) is not an authorised domain. Add it under Firebase Authentication → Settings → Authorized domains.`,
++    'auth/operation-not-allowed': `Phone sign-in is turned off in the Firebase project "${project}". In that project open Authentication → Sign-in method → Phone → Enable → Save. If you enabled it somewhere else, the app is connected to a different project — check src/config/firebase.ts.`,
++    'auth/configuration-not-found': `Firebase Authentication hasn't been set up in project "${project}" yet. Open Authentication in the Firebase console, click "Get started", then enable Phone.`,
++    'auth/unauthorized-domain': `This website (${host}) isn't allowed to sign in to project "${project}". Add ${host} under Firebase → Authentication → Settings → Authorized domains.`,
++    'auth/app-not-authorized': `This website isn't allowed to use the Firebase API key for project "${project}". Check the key's restrictions in Google Cloud console → APIs & Services → Credentials.`,
++    'auth/invalid-verification-id': 'This sign-in attempt expired. Tap “Change number” and send a new code.',
+     'auth/billing-not-enabled': 'SMS sign-in requires the Firebase Blaze (pay-as-you-go) plan on this project.',
+     'auth/invalid-api-key': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',
+     'auth/api-key-not-valid.-please-pass-a-valid-api-key.': 'The Firebase API key is invalid. Check FIREBASE_API_KEY on the server.',
+@@ -72,6 +79,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onProfileCreated, onFinish
+   const [userCount, setUserCount] = useState<number | null>(null);
+ 
+   const [legalModal, setLegalModal] = useState<LegalDocType>(null);
++  const configProblems = getRuntimeConfig()?.problems || [];
+ 
+   useEffect(() => {
+     if (status === 'needsProfile' && (step === 'phone' || step === 'code')) setStep('profile');
+@@ -236,6 +244,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onProfileCreated, onFinish
+       <div className="flex-1 p-6 space-y-4">
+         {(error || authError) && <ErrorBanner message={error || authError || ''} onDismiss={error ? () => setError('') : undefined} />}
+ 
++        {step === 'phone' && configProblems.length > 0 && (
++          <div className="p-3 rounded-2xl bg-gold/10 border border-gold/30 text-xs text-ink dark:text-mist space-y-1">
++            <p className="font-bold text-gold">Your Firebase config looks wrong — sign-in will fail until it's fixed:</p>
++            {configProblems.map((p) => (
++              <p key={p}>• {p}</p>
++            ))}
++          </div>
++        )}
++
+         {step === 'phone' && (
+           <form
+             className="space-y-4"
+diff --git a/src/components/BootScreens.tsx b/src/components/BootScreens.tsx
+index 2aec01a..4b74ebf 100644
+--- a/src/components/BootScreens.tsx
++++ b/src/components/BootScreens.tsx
+@@ -1,5 +1,5 @@
+ import React from 'react';
+-import { Settings2, AlertTriangle, RefreshCw } from 'lucide-react';
++import { Settings2, AlertTriangle, RefreshCw, CheckCircle2 } from 'lucide-react';
+ import { BRANDING } from '../config/branding';
+ import { Spinner } from './ui';
+ 
+@@ -19,17 +19,32 @@ interface SetupRequiredProps {
+   error?: string;
+ }
+ 
+-/** Shown when the server has no Firebase configuration (instead of silently failing). */
++const Step: React.FC<{ n: number; title: string; children: React.ReactNode }> = ({ n, title, children }) => (
++  <div className="flex gap-3">
++    <span className="w-6 h-6 rounded-full bg-brand text-white text-[11px] font-bold flex items-center justify-center flex-shrink-0">{n}</span>
++    <div className="text-xs text-ink-soft dark:text-mist-soft leading-relaxed space-y-1">
++      <p className="font-bold text-ink dark:text-mist">{title}</p>
++      {children}
++    </div>
++  </div>
++);
++
++/**
++ * Shown when the server has no Firebase web config. This is about *which project* to use —
++ * enabling Phone sign-in in the console is a separate step that cannot clear this screen.
++ */
+ export const SetupRequired: React.FC<SetupRequiredProps> = ({ missing = [], error }) => (
+-  <div className="min-h-screen bg-paper dark:bg-night flex items-center justify-center p-5">
+-    <div className="max-w-md w-full bg-white dark:bg-night-card border border-line dark:border-night-line rounded-3xl p-6 shadow-xl space-y-4">
++  <div className="min-h-screen bg-paper dark:bg-night flex items-center justify-center p-4">
++    <div className="max-w-lg w-full bg-white dark:bg-night-card border border-line dark:border-night-line rounded-3xl p-6 shadow-xl space-y-5">
+       <div className="flex items-center gap-3">
+-        <div className="w-11 h-11 rounded-2xl bg-gold/15 text-gold flex items-center justify-center">
++        <div className="w-11 h-11 rounded-2xl bg-gold/15 text-gold flex items-center justify-center flex-shrink-0">
+           {error ? <AlertTriangle className="w-6 h-6" /> : <Settings2 className="w-6 h-6" />}
+         </div>
+         <div>
+-          <h1 className="font-bold text-base text-ink dark:text-mist">{error ? `${BRANDING.appName} can't start` : 'Finish setting up'}</h1>
+-          <p className="text-xs text-ink-soft dark:text-mist-soft">{error ? 'The server could not be reached.' : 'Firebase is not configured on the server yet.'}</p>
++          <h1 className="font-bold text-base text-ink dark:text-mist">{error ? `${BRANDING.appName} can't start` : 'Connect your Firebase project'}</h1>
++          <p className="text-xs text-ink-soft dark:text-mist-soft">
++            {error ? 'The server could not be reached.' : "The app hasn't been given your Firebase web config yet."}
++          </p>
+         </div>
+       </div>
+ 
+@@ -37,17 +52,53 @@ export const SetupRequired: React.FC<SetupRequiredProps> = ({ missing = [], erro
+         <p className="text-xs text-red-600 dark:text-red-400 bg-red-500/10 rounded-xl p-3">{error}</p>
+       ) : (
+         <>
+-          <p className="text-xs text-ink-soft dark:text-mist-soft leading-relaxed">
+-            Add these environment variables (Firebase console → Project settings → Your apps → Web app config), then restart the server:
+-          </p>
+-          <ul className="bg-paper dark:bg-night rounded-xl p-3 space-y-1 font-mono text-[11px] text-ink dark:text-mist">
+-            {missing.map((m) => (
+-              <li key={m}>{m}</li>
+-            ))}
+-          </ul>
+-          <p className="text-[11px] text-ink-faint leading-relaxed">
+-            Also enable <strong>Authentication → Sign-in method → Phone</strong>, add your domain under <strong>Authorized domains</strong>,
+-            and deploy the security rules with <code>npm run deploy:rules</code>. See <code>.env.example</code> for everything else.
++          <div className="p-3 rounded-2xl bg-brand/10 text-xs text-ink dark:text-mist leading-relaxed">
++            <strong>Why you're seeing this:</strong> the app doesn't know <em>which</em> Firebase project to sign people in to. Turning on
++            Phone sign-in and adding test numbers in the Firebase console is still needed, but it can't clear this screen — only the
++            web config can.
++          </div>
++
++          <div className="space-y-4">
++            <Step n={1} title="Copy your web app config from Firebase">
++              <p>
++                Firebase console → ⚙ <strong>Project settings</strong> → <strong>General</strong> → scroll to <strong>Your apps</strong>.
++                If there is no Web app yet, click <strong>Add app → Web (&lt;/&gt;)</strong>. Under <strong>SDK setup and configuration</strong>,
++                choose <strong>Config</strong> and copy the <code>firebaseConfig</code> block.
++              </p>
++            </Step>
++            <Step n={2} title="Give it to the app (either option)">
++              <p>
++                <strong>Easiest:</strong> paste it between the backticks in <code className="font-mono">src/config/firebase.ts</code>, commit, and
++                redeploy. These values are public, so they are safe to commit.
++              </p>
++              <p>
++                <strong>Or</strong> set environment variables on your server
++                {missing.length > 0 && (
++                  <>
++                    {' '}
++                    (<span className="font-mono">{missing.join(', ')}</span>)
++                  </>
++                )}
++                , or one variable <code className="font-mono">FIREBASE_WEB_CONFIG</code> containing the whole block — then restart.
++              </p>
++            </Step>
++            <Step n={3} title="Allow this website to use sign-in">
++              <p>
++                Firebase → <strong>Authentication → Settings → Authorized domains</strong> → add{' '}
++                <code className="font-mono bg-paper dark:bg-night px-1 rounded">{window.location.hostname}</code>
++              </p>
++            </Step>
++            <Step n={4} title="Deploy the security rules">
++              <p>
++                Run <code className="font-mono">npm run deploy:rules</code> once (after setting your project ID in <code>.firebaserc</code>), otherwise
++                profiles and chats can't be saved.
++              </p>
++            </Step>
++          </div>
++
++          <p className="text-[11px] text-ink-faint flex items-start gap-1.5">
++            <CheckCircle2 className="w-3.5 h-3.5 text-success flex-shrink-0 mt-px" />
++            The iOS (APNs) and Android (SHA fingerprint) steps in the Firebase docs are for native apps only — this web app doesn't need them.
+           </p>
+         </>
+       )}
+@@ -56,7 +107,7 @@ export const SetupRequired: React.FC<SetupRequiredProps> = ({ missing = [], erro
+         onClick={() => window.location.reload()}
+         className="w-full py-3 rounded-full bg-brand hover:bg-brand-strong text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+       >
+-        <RefreshCw className="w-4 h-4" /> Retry
++        <RefreshCw className="w-4 h-4" /> I've done this — retry
+       </button>
+     </div>
+   </div>
+diff --git a/src/config/firebase.ts b/src/config/firebase.ts
+new file mode 100644
+index 0000000..c9d62db
+--- /dev/null
++++ b/src/config/firebase.ts
+@@ -0,0 +1,41 @@
++/**
++ * ─────────────────────────────────────────────────────────────
++ *  YOUR FIREBASE WEB APP CONFIG — paste it between the backticks
++ * ─────────────────────────────────────────────────────────────
++ * Where to find it: Firebase console → ⚙ Project settings → General →
++ * "Your apps" → your Web app (</>) → "SDK setup and configuration" → Config.
++ *
++ * Paste the snippet exactly as shown (the whole `const firebaseConfig = { … };`
++ * block is fine). These values are public by design — every browser that opens
++ * the app receives them — so it is safe to commit this file. Your service
++ * account and Bunny password are secrets and must NOT go here.
++ *
++ * FIREBASE_* environment variables, if set, take priority over this file.
++ */
++export const FIREBASE_CONFIG_SNIPPET = `
++
++`;
++
++export interface FirebaseWebConfig {
++  apiKey: string;
++  authDomain: string;
++  projectId: string;
++  storageBucket: string;
++  messagingSenderId: string;
++  appId: string;
++  measurementId: string;
++}
++
++/**
++ * Leniently reads `key: "value"` pairs from a pasted Firebase snippet or JSON,
++ * so both `apiKey: "…"` (JavaScript) and `"apiKey": "…"` (JSON) work.
++ */
++export function parseFirebaseConfig(text: string): Partial<FirebaseWebConfig> {
++  const out: Record<string, string> = {};
++  const pattern = /["']?(\w+)["']?\s*:\s*["'`]([^"'`]*)["'`]/g;
++  for (const match of (text || '').matchAll(pattern)) {
++    const value = match[2].trim();
++    if (value) out[match[1]] = value;
++  }
++  return out as Partial<FirebaseWebConfig>;
++}
+diff --git a/src/lib/firebase.ts b/src/lib/firebase.ts
+index c0f3744..4d6bdb2 100644
+--- a/src/lib/firebase.ts
++++ b/src/lib/firebase.ts
+@@ -12,6 +12,9 @@ import {
+ export interface RuntimeConfig {
+   firebase: FirebaseOptions | null;
+   missing: string[];
++  /** Config present but obviously wrong (e.g. placeholder API key). */
++  problems?: string[];
++  firebaseSource?: string | null;
+   emulators: { auth: string | null; firestore: string | null } | null;
+   features: { media: boolean; mediaCdn: boolean; turn: boolean };
+ }
+-- 
+2.43.0
+

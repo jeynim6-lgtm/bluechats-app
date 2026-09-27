@@ -33,8 +33,8 @@ WebRTC media flows directly between the two devices (or via your TURN relay).
 ## Go-live checklist
 
 1. **Firebase project**
-   - Create a Web app and copy its config into the `FIREBASE_*` variables (see `.env.example`).
-   - *Authentication → Sign-in method →* enable **Phone**. SMS sign-in requires the Blaze plan for production volumes; add test numbers under *Phone numbers for testing* for development.
+   - Create a Web app (*Project settings → Your apps → Add app → Web*) and paste its `firebaseConfig` block into **`src/config/firebase.ts`** (these values are public and safe to commit). Alternatively set the `FIREBASE_*` or `FIREBASE_WEB_CONFIG` environment variables. Enabling Phone sign-in alone is not enough — the app needs this config to know which project to use.
+   - *Authentication → Sign-in method →* enable **Phone**. The iOS/Android steps in Firebase's docs (APNs, SHA fingerprints) are for native apps and aren't needed for this web app. SMS sign-in requires the Blaze plan for production volumes; add test numbers under *Phone numbers for testing* for development.
    - *Authentication → Settings → Authorized domains →* add the domain the app is served from.
    - Deploy rules and indexes: set your project ID in `.firebaserc`, then run `npm run deploy:rules`.
    - Recommended: *Firestore → TTL policies →* collection `statuses`, field `expiresAt` (auto-deletes expired stories).

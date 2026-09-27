@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { env, bunnyConfigured, turnConfigured, missingFirebaseConfig } from './server/env.ts';
+import { env, bunnyConfigured, turnConfigured, missingFirebaseConfig, firebaseConfigProblems } from './server/env.ts';
 import { mediaRouter } from './server/media.ts';
 import { webrtcRouter } from './server/webrtc.ts';
 import { adminRouter } from './server/admin.ts';
@@ -34,6 +34,8 @@ async function startServer() {
     res.json({
       firebase: missing.length ? null : env.firebase,
       missing,
+      problems: missing.length ? [] : firebaseConfigProblems(),
+      firebaseSource: env.firebaseSource,
       emulators: env.emulators.auth || env.emulators.firestore
         ? { auth: env.emulators.auth || null, firestore: env.emulators.firestore || null }
         : null,
@@ -82,7 +84,13 @@ async function startServer() {
   app.listen(env.port, '0.0.0.0', () => {
     console.log(`Blue Chats server listening on http://0.0.0.0:${env.port} (${env.isProd ? 'production' : 'development'})`);
     const missing = missingFirebaseConfig();
-    if (missing.length) console.warn(`⚠  Firebase not configured — missing: ${missing.join(', ')}`);
+    if (missing.length) {
+      console.warn(`⚠  Firebase web config not found — missing: ${missing.join(', ')}`);
+      console.warn('   Paste your config into src/config/firebase.ts, or set the FIREBASE_* / FIREBASE_WEB_CONFIG variables.');
+    } else {
+      console.log(`   Firebase project "${env.firebase.projectId}" (config from ${env.firebaseSource || 'environment'})`);
+      firebaseConfigProblems().forEach((p) => console.warn(`⚠  Firebase config: ${p}`));
+    }
     if (env.emulators.auth || env.emulators.firestore) {
       console.log(`   Using Firebase emulators: auth=${env.emulators.auth || '-'} firestore=${env.emulators.firestore || '-'}`);
     }
